@@ -1,0 +1,2971 @@
+#!/bin/bash
+
+##
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+
+version=1_3
+
+/usr/bin/env python -V >/dev/null 2>&1
+if [ "$?" != "0" ]; then
+  echo "Sorry, this program requires 'python', but it could be found in your \$PATH"
+  exit 1
+fi
+
+python_src=/tmp/jallie_${version}.py
+if [ ! -f ${python_src} -o $0 -nt ${python_src} ]; then
+cat > ${python_src} << __EOF__
+
+import struct
+import copy
+import imp
+from sys import argv, exit
+from os import environ
+from optparse import OptionParser
+
+class Package(object):
+  def __init__(self, str): self.str = str
+  def __str__(self): return 'package: ' + self.str
+
+class _Main(object):
+  def __init__(self):
+    self.CLASSPATH = environ.get('CLASSPATH')
+  def run(self):
+    parser=OptionParser()
+    parser.add_option("-q", "--quiet", action="store_true", dest="quiet",
+                      default=False, help="Write status messages")
+    parser.add_option("-i", "--interactive", action="store_true",
+                      dest="interactive", default=False,
+                      help="Don't exit automatically")
+    parser.add_option("-d", "--dis", action="store_true", dest="dis",
+                      default=False, help="Disassemble files and exit")
+    parser.add_option("-p", "--processor", dest="processor",
+                      help="Run user-defined processor over files and exit")
+    parser.add_option("-g", "--processor_arg", dest="processor_arg",
+                      help="Argument to pass to processor")
+    parser.add_option("-e", "--details", dest="detailLevel", default=0,
+                      type='int', help="Default levels of detail to display")
+    (options, args) = parser.parse_args()
+    if options.dis: options.quiet = True
+    if options.quiet: Settings.verbose = False
+    Settings.extraDetailLevels = options.detailLevel
+    for x in args:
+      self.initFile(x)
+    if options.dis:
+      detail = Settings.extraDetailLevels
+      Settings.extraDetailLevels = 100000
+      for x in loaded: print x
+      if not options.interactive: exit()
+      Settings.extraDetailLevels = detail
+    if options.processor != None:
+      location = imp.find_module(options.processor)
+      module = imp.load_module(options.processor, *location)
+      for x in loaded:
+        if options.processor_arg:
+          if Settings.verbose: 
+            print ('Processing class %s with arg %s' %
+              (x.classname(), options.processor_arg))
+          module.for_ClassFile(x, options.processor_arg)
+        else:
+          if Settings.verbose: print 'Processing class:', x.classname()
+          module.for_ClassFile(x)
+      if not options.interactive: exit()
+  def possibleFilenames(self, x):
+    files = [ x ]
+    files += [ x + '.class' ]
+    files += [ x.replace('.', '/') + '.class' ]
+    if self.CLASSPATH != None:
+      for cp in self.CLASSPATH.split(':'):
+        files += [ cp + '/' + x ]
+        files += [ cp + '/' + x + '.class' ]
+        files += [ cp + '/' + x.replace('.', '/') + '.class' ]
+    return files
+  def loadFile(self, file):
+    for x in self.possibleFilenames(file):
+      try:
+        return ClassFile(x)
+      except IOError: pass
+    print 'Could not load classfile: ', x
+    return None
+  def initFile(self, file):
+    cf = self.loadFile(file)
+    globals()['loaded'] += [ cf ]
+    if cf != None:
+      name_cls = cf.constant_pool[cf.this_class]
+      if isinstance(name_cls, CONSTANT_Class_info):
+        name_utf8 = cf.constant_pool[name_cls.name_index]
+        if isinstance(name_utf8, CONSTANT_Utf8_info):
+          name = name_utf8.bytes
+          package = name.split('/')[:-1]
+          classname = name.split('/')[-1]
+          if len(package) == 0: globals().__setitem__(name, cf)
+          else:
+            p = _Main.packageFor(package)
+            p.__setattr__(classname, cf)
+          if Settings.verbose: print 'Loaded class:', name.replace('/','.')
+          return
+      if Settings.verbose: print 'Loaded class: ????'
+  def packageFor(package_list):
+    top=globals()
+    name=''
+    for x in package_list:
+      if name == '': name = x
+      else: name += '.' + x
+      try: p = top.__getattribute__(x)
+      except AttributeError:
+        p = Package(name)
+        if top == globals(): top.__setitem__(x, p)
+        else: top.__setattr__(x, p)
+      top = p
+    return top
+  packageFor = staticmethod(packageFor)
+
+class Settings(object):
+  # Indicates how many extra levels of detail to print
+  extraDetailLevels = 0
+  # What to use for indent
+  indent = '  '
+  # Verbosity
+  verbose = True
+
+class _ParseError(Exception):
+  """Raised when an unrecoverable error occurs"""
+  def __init__(self, message = 'Unspecified'):
+    self.message = message
+  def __str__(self):
+    print "\nFatal parse error:", self.message
+
+class _OperationDenied(Exception):
+  """Raised a bouncer denies an operation"""
+  def __init__(self, message):
+    self.message = message
+  def __str__(self):
+    print "\nThe operation was denied:", self.message
+
+class _Bouncer(object):
+  """ superclass of bouncers - this one does nothing """
+  def pre_op(self, lst, start, end, replace): return replace
+  def post_op(self): pass
+
+class _HexDisplayer(object):
+  """ dumps the bytes of the specified argument as hex """
+  def __init__(self, obj, formatted=True):
+    self.obj = obj
+    self.count = 0
+    self.rep = ''
+    self.formatted = formatted
+  def push(self, byte):
+    if self.formatted and self.count % 16 == 0:
+      self.rep += '%07x:' % self.count
+    if self.formatted and self.count % 2 == 0:
+      self.rep += ' '
+    self.rep += '%02x' % struct.unpack('>B', byte)[0]
+    if not self.formatted: self.rep += ' '
+    self.count = self.count + 1
+    if self.formatted and self.count % 16 == 0: self.rep += '\n'
+  def __str__(self):
+    self.obj.serialize(self)
+    return self.rep
+
+class _ClassFileWriter(object):
+  """ writes the classfile (or part of it) to a file """
+  def __init__(self, obj, filename):
+    self.file = open(filename, 'wb')
+    bytecount = obj.serialize(self)
+    self.file.close()
+    print "Wrote %d bytes to file '%s'" % (bytecount, filename)
+  def push(self, b):
+    self.file.write(b)
+
+class _PrimitiveIter(object):
+  """ Iterates over the bytes of an integer type (one result per byte in int)"""
+  def __init__(self, v):
+    super(_PrimitiveIter, self).__init__()
+    self.value = v
+    self.msb = 0
+    while 0xff << (self.msb * 8) < self.value:
+      self.msb += 1
+  def next(self):
+    if self.msb < 0: raise StopIteration()
+    v = (self.value & (0xff << (self.msb * 8))) >> (self.msb * 8)
+    self.msb -= 1
+    return struct.pack('>B', v)
+
+class _ArrayIter(object):
+  """ Iterates over the bytes of an array of integer types
+      (one result per element)"""
+  def __init__(self, a):
+    super(_ArrayIter, self).__init__()
+    self.array = a
+    self.index = 0
+  def next(self):
+    if self.index > len(self.array): raise StopIteration()
+    idx = self.index
+    self.index += 1
+    return struct.pack('>B', self.array[idx])
+
+class _FileIter(object):
+  def __init__(self, filename):
+    super(_FileIter, self).__init__()
+    self.stream = open(filename, 'rb')
+    self.length = self.getFileLength()
+    self.position = 0
+  def next(self):
+    c = self.stream.read(1)
+    self.position += 1
+    if len(c) != 1:
+      raise StopIteration()
+    return c
+  def bytesLeft(self):
+    return self.length - self.position
+  def getFileLength(self):
+    current = self.stream.tell()
+    self.stream.seek(0, 2)
+    length = self.stream.tell()
+    self.stream.seek(current, 0)
+    return length
+  def close(self):
+    self.stream.close()
+
+class _SafeFileIter(_FileIter):
+  def __init__(self, filename):
+    super(_SafeFileIter, self).__init__(filename)
+    self.message = False
+  def next(self):
+    if self.message == True:
+      return '\x00'
+    try:
+      return super(_SafeFileIter, self).next()
+    except StopIteration:
+      print 'Parse error!  File truncated, filling with 0'
+      self.message = True
+      return '\x00'
+
+class _List(object):
+  """ Equivalent to a global list object, but has '_Bouncer' objects attached
+      which can control the assignment to and changing of the list """
+  # Organize methods such that the side effects will not occur until the
+  # end and all bouncers have had a chance to kill the operation by
+  # throwing an _OperationDenied
+  def __init__(self, iter = None, bouncers = None):
+    self._list = list()
+    self._bouncers = bouncers
+    if bouncers is None: self._bouncers = []
+    if not iter is None:
+      for x in iter: self._list.append(x)
+
+  def _clone(self, lst): 
+    return _List(lst, copy.copy(self._bouncers))
+
+  def _normalize(self, idx):
+    if idx < 0: return len(self) + idx
+    else: return idx
+
+  def _modify(self, start, end, elems):
+    nstart = self._normalize(start)
+    nend = self._normalize(end)
+    if nend is None or nend > len(self): nend = len(self)
+    for b in self._bouncers:
+      elems = b.pre_op(self, nstart, nend, elems)
+    self._list.__setslice__(nstart, nend, elems)
+    for b in self._bouncers:
+      b.post_op()
+    return self
+  
+  def _modify_one(self, idx, elems):
+    nidx = self._normalize(idx)
+    return self._modify(nidx, nidx + 1, elems)
+
+  def __add__(self, o): return self._clone(self._list).__iadd__(o)
+  def __contains__(self, y): return y in self._list
+  def __delitem__(self, i): self._modify_one(i, [])
+  def __delslice__(self, i, j): self._modify(i, j, [])
+  def __eq__(self, o): return self._list.__eq__(o._list)
+  def __ge__(self, o): return self._list.__ge__(o._list)
+  def __getitem__(self, i): return self._list.__getitem__(i)
+  def __getslice__(self, i, j): return self._clone(self._list.__getslice__(i,j))
+  def __gt__(self, o): return self._list.__gt__(o._list)
+  def __hash__(self): return self._list.__hash__()
+  def __iadd__(self, elems): return self._modify(len(self), len(self), elems)
+  def __imul__(self, factor):
+    return self._modify(len(self), len(self), self._list * (factor - 1))
+  def __iter__(self): return self._list.__iter__()
+  def __le__(self, o): return self._list.__le__(o._list)
+  def __len__(self): return self._list.__len__()
+  def __lt__(self, o): return self._list.__lt__(o._list)
+  def __mul__(self, n):return self._clone(self._list * n)
+  def __ne__(self, o):
+    return type(self) != type(o) or self._list.__ne__(o._list)
+  def __repr__(self): return self._list.__repr__()
+  def __reversed__(self): return self._list.__reversed__()
+  def __rmul__(self, n): return self.__mul__(n)
+  def __setitem__(self, i, v): 
+    self._modify_one(i, [ v ])
+    return self[i]
+  def __setslice__(self, i, j, elems): 
+    self._modify(i, j, elems)
+    return self.__getslice__(i, j)
+  def append(self, o):
+    self._modify(len(self), len(self), [ o ])
+  def count(self, value): return self._list.count(value)
+  def extend(self, iter):
+    self._modify(len(self), len(self), [ x for x in iter ])
+  def index(self, object, start=0, stop=None):
+    if stop == None: stop = len(self)
+    return self._list.index(object, start, stop)
+  def insert(self, idx, object): self._modify(idx, idx, [ object ])
+  def pop(self):
+    top = self[ 1]
+    self._modify(len(self) - 1, len(self), [])
+    return top
+  def remove(self, v): self._modify_one(self.index(v), [])
+  def reverse(self): 
+    c=copy.copy(self._list)
+    c.reverse()
+    self._modify(0, len(self), c)
+  def sort(self, cmp=None, key=None, reverse=False):
+    c=copy.copy(self._list)
+    c.sort(cmp, key, reverse)
+    self._modify(0, len(self), c)
+  def __str__(self):
+    str='[ '
+    for x in self[0:1]:
+      str += x.briefString()
+    for x in self[1:]:
+      str += ', ' + x.briefString()
+    str += ' ]'
+    return str
+
+class _Object(object):
+  """ Base class for all class file objects """
+  def __init__(self, container = None):
+    super(_Object, self).__init__()
+    self._container = container
+
+  def newInstance(cls, iter, container):
+    elem = cls()
+    elem.setContainer(container)
+    elem = elem.deserialize(iter)
+    return elem
+  newInstance = classmethod(newInstance)
+
+  def name(cls): return cls.__name__
+  name = classmethod(name)
+
+  def serialize(self, ostream): return 0
+  def deserialize(self, iter): return self
+  def size(self): return 0
+
+  def container(self): return self._container
+  def setContainer(self, c): self._container = c
+
+  def path(self):
+    mypath=''
+    if self.container() != None:
+      mypath = self.container().path()
+      if isinstance(self.container(), _Array):
+        for x in range(len(self.container())):
+          if self.container()[x] == self:
+            return mypath + '[%d]' % x
+      elif isinstance(self.container(), _Component):
+        return mypath + '.' + self.container().name
+      else: return '<unknown>'
+
+  def classfile(self):
+    if type(self) == ClassFile: return self
+    elif self.container() != None: return self.container().classfile()
+    else: return None
+
+  def newInstance(cls, iter, container):
+    elem = cls()
+    elem.setContainer(container)
+    elem = elem.deserialize(iter)
+    return elem
+  newInstance = classmethod(newInstance)
+
+  def toString(self, level=0, field=None):
+    return Settings.indent * level + self.briefString(field)
+  def briefString(self, field=None):
+    field_name = ''
+    if field != None: field_name = field.name
+    return self.name() + ' %s = None' % field_name
+  def __str__(self): return self.toString()
+  def hex(self):
+    print _HexDisplayer(self)
+
+  def getIterationList(self, lst):
+    lst += [ self ]
+
+class _Component(_Object):
+  """ A components is a member of a composite structure """
+  def __init__(self, name, value, formatter = None, bouncers = None):
+    super(_Component, self).__init__()
+    self.name = name
+    self.value = value
+    self.formatter = formatter
+    self.index = 0
+    self._bouncers = bouncers
+    if bouncers is None: self._bouncers = []
+    self.value.setContainer(self)
+
+  def get(self):
+    return self.value
+  def set(self, newvalue):
+    try:
+      lst = [ newvalue ]
+      for b in self._bouncers:
+        lst = b.pre_op(self.container(), 0, 1, lst)
+      self.value = lst[0]
+      for b in self._bouncers:
+        b.post_op()
+    except _OperationDenied, e:
+      print "Error performing assignment:", e.message
+  def __eq__(self, o): return self.name == o.name and self.get() == o.get()
+  def index(self): return self.index
+  def setIndex(self, idx): self.index = idx
+  def path(self): return self.container().path()
+  def __str__(self):
+    if self.formatter != None:
+      return self.formatter.format(self.value)
+    else:
+      return self.value.__str__()
+
+class _Composite(_Object):
+  """ A _Composite is a "struct" type that consists of _Components.
+      Components values are accessible by name as regular field accesses """
+  def __init__(self):
+    super(_Composite, self).__init__()
+    self._components = ()
+
+  def components(self): return self._components
+  def component(self, idx): return self._components[idx]
+  def addComponent(self, comp):
+    comp.setContainer(self)
+    comp.setIndex(len(self._components))
+    self._components += ( comp, )
+
+  def __eq__(self, o): return self.components() == o.components()
+
+  def getIterationList(self, lst):
+    super(_Composite, self).getIterationList(lst)
+    for x in self.components():
+      x.value.getIterationList(lst)
+
+  _published = False
+  def publish(self):
+    if not self._published:
+      cls = type(self)
+      for i in range(len(self.components())):
+        component = self.component(i)
+        type.__setattr__(cls, component.name, _Composite.__accessorFor(i))
+      self._published = True
+
+  def __accessorFor(index):
+    return property(lambda x: x.component(index).get(),
+                    lambda x,y: x.component(index).set(y), None, None)
+  __accessorFor = staticmethod(__accessorFor)
+   
+
+  def serialize(self, ostream):
+    return reduce(lambda x,y: x+y, \
+              map(lambda w: w.get().serialize(ostream), self.components()), 0)
+
+  def deserialize(self, iter):
+    for x in self.components(): x.value = x.value.deserialize(iter)
+    return self
+
+  def size(self):
+    return reduce(
+        lambda x,y: x+y, map(lambda z: z.value.size(), self.components()), 0)
+
+  def briefString(self, field=None):
+    field_name = ''
+    if field != None: field_name = field.name
+    return self.name() + ' %s = { ... }' % field_name
+
+  def toString(self, level=0, field=None):
+    indent = Settings.indent * level
+    field_name = ''
+    if field != None: field_name = field.name
+    ret = indent + self.name() + ' %s {\n' % field_name
+    for x in self.components():
+      if level + 1 > Settings.extraDetailLevels:
+        ret += indent + Settings.indent + x.get().briefString(x) + '\n'
+      else: ret += x.get().toString(level + 1, x) + '\n'
+    ret += indent + '}'
+    return ret
+
+class _Primitive(_Object):
+  """ Base class for all primitive types """
+  def __init__(self, v = 0):
+    super(_Primitive, self).__init__()
+  def do_toString(self, prim, level, field):
+    if field != None:
+      ret = Settings.indent * level + '%s %s = ' % (self.name(), field.name)
+      if field.formatter != None:
+        ret += field.formatter.format(self)
+      else: ret += prim.__str__(self)
+      return ret
+    else: return prim.__str__(self)
+
+class u1(_Primitive, int):
+  def __new__(cls, v = 0): return int.__new__(cls, v & 0xff)
+  def __init__(self, v = 0): super(u1, self).__init__()
+  def serialize(self, ostream): 
+    ostream.push(struct.pack('>B', self))
+    return 1
+  def deserialize(self, iter):
+    v = u1(struct.unpack('>B', iter.next())[0])
+    v.setContainer(self.container())
+    return v
+  def size(self): return 1
+  def toString(self, level=0, field=None):
+    return self.do_toString(int, level, field)
+  def briefString(self, field=None):
+    return self.do_toString(int, 0, field)
+
+class s1(_Primitive, int):
+  def __new__(cls, v = 0): return int.__new__(cls, v)
+  def __init__(self, v = 0): super(s1, self).__init__(v)
+  def serialize(self, ostream):
+    ostream.push(struct.pack('>b', self))
+    return 1
+  def deserialize(self, iter):
+    v = s1(struct.unpack('>b', iter.next())[0])
+    v.setContainer(self.container())
+    return v
+  def size(self): return 1
+  def toString(self, level=0, field=None):
+    return self.do_toString(int, level, field)
+  def briefString(self, field=None):
+    return self.do_toString(int, 0, field)
+
+class u2(_Primitive, int):
+  def __new__(cls, v = 0): return int.__new__(cls, v & 0xffff)
+  def __init__(self, v = 0): super(u2, self).__init__(v)
+  def serialize(self, ostream):
+    for x in struct.pack('>H', self): ostream.push(x)
+    return 2
+  def deserialize(self, iter):
+    data = iter.next() + iter.next()
+    v = u2(struct.unpack('>H', data)[0])
+    v.setContainer(self.container())
+    return v
+  def size(self): return 2
+  def toString(self, level=0, field=None):
+    return self.do_toString(int, level, field)
+  def briefString(self, field=None):
+    return self.do_toString(int, 0, field)
+
+class s2(_Primitive, int):
+  def __new__(cls, v = 0): return int.__new__(cls, v)
+  def __init__(self, v = 0): super(s2, self).__init__(v)
+  def serialize(self, ostream):
+    for x in struct.pack('>h', self): ostream.push(x)
+    return 2
+  def deserialize(self, iter):
+    data = iter.next() + iter.next()
+    v = s2(struct.unpack('>h', data)[0])
+    v.setContainer(self.container())
+    return v
+  def size(self): return 2
+  def toString(self, level=0, field=None):
+    return self.do_toString(int, level, field)
+  def briefString(self, field=None):
+    return self.do_toString(int, 0, field)
+
+class u4(_Primitive, long):
+  def __new__(cls, v = 0): return long.__new__(cls, v & 0xffffffff)
+  def __init__(self, v = 0): super(u4, self).__init__()
+  def serialize(self, ostream):
+    for x in struct.pack('>I', self): ostream.push(x)
+    return 4
+  def deserialize(self, iter):
+    data = iter.next() + iter.next() + iter.next() + iter.next()
+    v = u4(struct.unpack('>I', data)[0])
+    v.setContainer(self.container())
+    return v
+  def size(self): return 4
+  def toString(self, level=0, field=None):
+    return self.do_toString(long, level, field)
+  def briefString(self, field=None):
+    return self.do_toString(long, 0, field)
+
+class s4(_Primitive, long):
+  def __new__(cls, v = 0): return long.__new__(cls, v)
+  def __init__(self, v = 0): super(s4, self).__init__()
+  def serialize(self, ostream):
+    for x in struct.pack('>i', self): ostream.push(x)
+    return 4
+  def deserialize(self, iter):
+    data = iter.next() + iter.next() + iter.next() + iter.next()
+    v = s4(struct.unpack('>i', data)[0])
+    v.setContainer(self.container())
+    return v
+  def size(self): return 4
+  def toString(self, level=0, field=None):
+    return self.do_toString(long, level, field)
+  def briefString(self, field=None):
+    return self.do_toString(long, 0, field)
+
+class _Utf8(_Object, str):
+  def __new__(cls, v = ''): return str.__new__(cls, v)
+  def __init__(self, v = ''): super(_Utf8, self).__init__()
+  def serialize(self, ostream):
+    for x in self: ostream.push(x)
+    return self.size()
+  def deserialize(self, iter):
+    # retrieve length from the component before this one
+    component = self.container()
+    i = component.index - 1
+    length = component.container().component(i).value
+    data = ''
+    for i in range(length):
+      if iter.bytesLeft() <= 0:
+        print "Parse error -- Truncated file"
+        break
+      data += iter.next()
+    v = _Utf8(data)
+    v.setContainer(self.container())
+    return v
+  def size(self): return len(self)
+  def toString(self, level=0, field=None):
+    ret = ''
+    if field != None:
+      ret = Settings.indent * level + 'u1 ' + field.name + '[] = '
+    ret += '"' + self.asString() + '"'
+    return ret
+  def briefString(self, field=None): return self.toString(0, field)
+  def asString(self): return str.__str__(self)
+
+class _CpIndex(u2):
+  def __new__(cls, v = 0): return u2.__new__(cls, v)
+  def __init__(self, v = 0): super(_CpIndex, self).__init__(v)
+  def deserialize(self, iter):
+    v = _CpIndex(super(_CpIndex, self).deserialize(iter))
+    v.setContainer(self.container())
+    return v
+  def __str__(self): return '%d' % self
+  def toString(self, level=0, field=None):
+    return Settings.indent * level + self.briefString(field)
+
+  def description(self):
+    if self.classfile() != None:
+      cp = self.classfile().constant_pool
+      if self >= 0 and self < len(cp):
+        return ' // %s' % cp[self].veryBriefString()
+    return ''
+
+  def briefString(self, field=None):
+    ret=''
+    if field != None:
+      ret = 'u2 %s = ' % field.name
+    ret += '#%d%s' % (self, self.description())
+    return ret
+  def veryBriefString(self):
+    if self.classfile() != None:
+      cp = self.classfile().constant_pool
+      if self >= 0 and self < len(cp):
+        return '%s' % cp[self].veryBriefString()
+    return '#%d' % self
+  def name(cls): return "u2"
+  name = classmethod(name)
+
+class _CpIndex_1(_CpIndex):
+  def __new__(cls, v = 0):
+    return _CpIndex.__new__(cls, v)
+  def __init__(self, v = 0):
+    super(_CpIndex_1, self).__init__(v)
+  def serialize(self, ostream):
+    v = u1(self)
+    v.serialize(ostream)
+    return 1
+  def deserialize(self, iter):
+    v = u1().deserialize(iter)
+    ret = _CpIndex_1(v)
+    ret.setContainer(self.container())
+    return ret
+  def size(self): return u1().size()
+  def name(cls): return 'u1'
+  name = classmethod(name)
+
+class _ArrayType(u1):
+  def __new__(cls, v = 0):
+    return u1.__new__(cls, v)
+  def __init__(self, v = 0):
+    super(_ArrayType, self).__init__(v)
+  def name(cls): return 'u1'
+  name = classmethod(name)
+  def toString(self, level=0, field=None):
+    ret = ''
+    if field != None:
+      ret += Settings.indent * level + '%s %s = ' % \
+          ( self.name(), field.name )
+    if self == 4: ret += 'T_BOOLEAN'
+    elif self == 5: ret += 'T_CHAR'
+    elif self == 6: ret += 'T_FLOAT'
+    elif self == 7: ret += 'T_DOUBLE'
+    elif self == 8: ret += 'T_BYTE'
+    elif self == 9: ret += 'T_SHORT'
+    elif self == 10: ret += 'T_INT'
+    elif self == 11: ret += 'T_LONG'
+    else: ret += 'INVALID_ARRAY_TYPE(%d)' % self
+    return ret
+  def briefString(self, field=None):
+    return self.toString(0, field)
+
+
+class _Array(_Composite, _List):
+  def __init__(self, element_type, data=None, bouncers=None):
+    _Composite.__init__(self)
+    _List.__init__(self, data, bouncers)
+    self.element_type = element_type
+
+  def _clone(self, lst):
+    return _Array(self.element_type, lst, copy.copy(self._bouncers))
+
+  def serialize(self, stream):
+    return reduce(lambda x,y: x+y, map(lambda w: w.serialize(stream), self), 0)
+  def deserialize(self, iter): pass
+
+  def getIterationList(self, lst):
+    super(_Composite, self).getIterationList(lst)
+    for x in self:
+      x.getIterationList(lst)
+
+  def size(self):
+    return reduce(lambda x,y: x+y, map(lambda z: z.size(), self), 0)
+  def toString(self, level=0, field=None):
+    indent = Settings.indent * level
+    field_name = ''
+    if field != None: field_name = ' ' + field.name
+    ret = indent + self.element_type.name()
+    ret +='%s[%d] {\n' % ( field_name, len(self) )
+    for i in range(len(self)):
+      ret += Settings.indent * (level + 1) + ('[ %d ] ' % i).ljust(6)
+      if level + 1 > Settings.extraDetailLevels:
+        ret += self[i].briefString() + '\n'
+      else:
+        elementRep = self[i].toString(level + 1, None)
+        if elementRep[:(level + 1) * len(Settings.indent)] == \
+            Settings.indent * (level + 1):
+          ret += elementRep[(level + 1) * len(Settings.indent):] + '\n'
+        else: ret += elementRep + '\n'
+    ret += indent + '}'
+    return ret
+  def briefString(self, field=None):
+    field_name = ''
+    if field != None: field_name = ' ' + field.name
+    return self.element_type.name() + '%s' % field_name + \
+        '[%d] = { ... }' % len(self)
+
+class _CountedArray(_Array):
+  """ An array whose length is determined by the previous component """
+  def __init__(self, element_type, data=None, keep_prefix=0, bouncers=None):
+    super(_CountedArray, self).__init__(element_type, data, bouncers)
+    self.keep_prefix = keep_prefix
+
+  def _clone(self, lst):
+    return _CountedArray(self.element_type, lst, self.keep_prefix, 
+                         copy.copy(self._bouncers))
+
+  def deserialize(self, iter):
+    component = self.container()
+    i = component.index - 1
+    length = component.container().component(i).value
+    for x in self[self.keep_prefix:]: 
+      self.remove(x)
+    skip_next = False
+    for i in range(length - self.keep_prefix):
+      if skip_next:
+        skip_next = False
+        self.append(CONSTANT_Null())
+      else:
+        if iter.bytesLeft() <= 0:
+          print 'Parse error -- Truncated file.'
+          break
+        elem = self.element_type.newInstance(iter, self)
+        if isinstance(elem, CONSTANT_Long_info) or \
+           isinstance(elem, CONSTANT_Double_info):
+          skip_next = True
+        self.append(elem)
+    return self
+
+class _TableSwitchOffsets(_Array):
+  def __init__(self, data=None, bouncers=None):
+    super(_TableSwitchOffsets, self).__init__(s4, data, bouncers)
+  def _clone(self, l):
+    return _TableSwitchOffsets(self.element_type, l, copy.copy(self._bouncers))
+  def deserialize(self, iter):
+    component = self.container()
+    low = component.index - 2
+    high = component.index - 1
+    length = component.container().component(high).value - \
+             component.container().component(low).value + 1
+    for x in self: self.remove(x)
+    for i in range(length):
+      if iter.bytesLeft() <= 0:
+        print 'Parse error -- Truncated file.'
+        break
+      self.append(s4().deserialize(iter))
+    return self
+
+class _BytecodeArray(_CountedArray):
+  def __init__(self, data=None, bouncers=None):
+    super(_BytecodeArray, self).__init__(bytecode, data, 0, bouncers)
+
+  def _clone(self, lst):
+    return _BytecodeArray(lst, copy.copy(self._bouncers))
+
+  def serialize(self, ostream):
+    return reduce(lambda x,y: x+y, map(lambda z: z.serialize(ostream), self), 0)
+
+  def deserialize(self, iter):
+    component = self.container()
+    i = component.index - 1
+    length = component.container().component(i).value
+    for x in self: self.remove(x)
+    bci = 0
+    while bci < length:
+      if iter.bytesLeft() <= 0:
+        print 'Parse error -- Truncated file.'
+        break
+      bc = bytecode.newInstance(iter, self, bci)
+      bci = bci + bc.size()
+      self.append(bc)
+    return self
+
+  def size(self):
+    return reduce(lambda x,y: x+y, map(lambda z: z.size(), self), 0)
+
+  def toString(self, level=0, field=None):
+    indent = Settings.indent * level
+    field_name = ''
+    if field != None: field_name = ' ' + field.name
+    ret = indent + self.element_type.name()
+    ret +='%s[%d] {\n' % ( field_name, len(self) )
+    bci = 0
+    for i in range(len(self)):
+      idx_str = ('%d' % i).rjust(2)
+      ret += Settings.indent * (level + 1) + ('[ %s ] ' % idx_str).ljust(6)
+      if level + 1 > Settings.extraDetailLevels:
+        ret += self[i].briefString(None) + '\n'
+      else:
+        elementRep = self[i].toString(level + 1, None)
+        if elementRep[:(level + 1) * len(Settings.indent)] == \
+            Settings.indent * (level + 1):
+          ret += elementRep[(level + 1) * len(Settings.indent):] + '\n'
+        else: ret += elementRep + '\n'
+      bci += self[i].size()
+    ret += indent + '}'
+    return ret
+
+
+class _FixedSizeArray(_Array):
+  """ A fixed-size array """
+  def __init__(self, element_type, length, data = [], bouncers=None):
+    super(_FixedSizeArray, self).__init__(element_type, data, bouncers)
+    self.length = length
+
+  def _clone(self, lst):
+    return _FixedSizeArray(self.element_type, self.length, 
+                           lst, copy.copy(self._bouncers))
+
+  def deserialize(self, iter):
+    self[:] = []
+    for i in range(self.length):
+      if iter.bytesLeft() <= 0:
+        print 'Parse error -- Truncated file.'
+        break
+      self.append(self.element_type.newInstance(iter, self))
+    return self
+
+class _AutoLengthComponent(_Component):
+  """This component is the length of the next field"""
+  def __init__(self, name, value):
+    super(_AutoLengthComponent, self).__init__(name, value, None,
+      [ _ReadOnlyBouncer("Field is a length field (change the array instead)") ])
+  def get(self):
+    array = self.container().component(self.index + 1).value
+    return type(self.value)(len(array))
+
+class _AutoSizeComponent(_Component):
+  def __init__(self, name, value, range_start, range_stop):
+    super(_AutoSizeComponent, self).__init__(name, value, None,
+       [ _ReadOnlyBouncer("Field is a length field") ])
+    self.start = range_start
+    self.stop = range_stop
+  def get(self):
+    size = 0
+    container = self.container()
+    for x in range(self.start, self.stop):
+      size = size + container.component(x).value.size()
+    return type(self.value)(size)
+
+class _AccessFlagsFormatter(object):
+  def __init__(self):
+    super(_AccessFlagsFormatter, self).__init__()
+    self.names = [
+      'ACC_PUBLIC',   'ACC_PRIVATE',     'ACC_PROTECTED','ACC_STATIC',
+      'ACC_FINAL',    'ACC_SYNCHRONIZED','ACC_VOLATILE', 'ACC_TRANSIENT',
+      'ACC_NATIVE',   'ACC_INTERFACE',   'ACC_ABSTRACT', 'ACC_STRICT',
+      'ACC_SYNTHETIC','ACC_ANNOTATION',  'ACC_ENUM',     'ACC_UKNOWN_0x8000'
+    ]
+
+  def format(self, value):
+     ret = '( '
+     first = True
+     for i in range(16):
+       flag = 1 << i
+       if (value & flag) == flag:
+         if not first: ret += ', '
+         ret += self.names[i]
+         first = False
+     ret += ' )'
+     return ret
+
+class _AccessFlagsFormatterForClass(_AccessFlagsFormatter):
+  def __init__(self):
+    super(_AccessFlagsFormatterForClass, self).__init__()
+    self.names[5] = 'ACC_SUPER'
+
+class _AccessFlagsFormatterForMethod(_AccessFlagsFormatter):
+  def __init__(self):
+    super(_AccessFlagsFormatterForMethod, self).__init__()
+    self.names[6] = 'ACC_BRIDGE'
+    self.names[7] = 'ACC_VARARGS'
+    self.names[9] = 'ACC_DEFAULT'
+
+
+class _ReferenceKindFormatter(object):
+  def __init__(self):
+    super(_ReferenceKindFormatter, self).__init__()
+    self.names = [
+      'REF_UNKNOWN_0', 'REF_getfield',  'REF_getStatic', 'REF_putField',
+      'REF_putStatic', 'REF_invokeVirtual', 'REF_invokeStatic', 
+      'REF_invokeSpecial', 'REF_newInvokeSpecial', 'REF_invokeInterface'
+    ]
+  def format(self, value):
+    if value <= REF_invokeInterface:
+      ret = self.names[value]
+    else: 
+      ret = 'REF_UNKNOWN_%d' % value
+    return ret
+
+class _HexFormatter(object):
+  def __init__(self, format = '0x%0x'):
+    super(_HexFormatter, self).__init__()
+    self.format_string = format
+  def format(self, v):
+    return self.format_string % v
+
+class _AsciiFormatter(object):
+  def __init__(self):
+    super(_AsciiFormatter, self).__init__()
+  def format(self, v):
+    return "'" + struct.pack('>B', v) + "'"
+
+class _ReadOnlyBouncer(_Bouncer):
+  def __init__(self, message='Field is read-only'):
+    super(_ReadOnlyBouncer, self).__init__()
+    self.message = message
+  def pre_op(self, lst, start, end, replace): 
+    raise _OperationDenied(self.message)
+
+class _BytecodeConverter(_Bouncer):
+  def __init__(self): super(_BytecodeConverter, self).__init__()
+  def _convert(self, v):
+    if isinstance(v, bytecode): return v
+    elif type(v) is type and bytecode in v.mro(): return v()
+    elif type(v) is int: return bytecode.newInstance(_PrimitiveIter(v))
+    elif type(v) is list: return bytecode.newInstance(_ArrayIter(v))
+    raise _OperationDenied("Cannot convert type %s to bytecode" % type(v))
+  def pre_op(self, lst, start, end, replace): 
+    return map(lambda v: self._convert(v), replace)
+
+class _TypeConverter(_Bouncer):
+  def __init__(self, outtype, unchanged_types, converted_types):
+    super(_TypeConverter, self).__init__()
+    self._outType = outtype
+    self._unchanged = unchanged_types
+    self._converted = converted_types
+  def _convert(self, v, container):
+    if type(v) in self._unchanged:
+      v.setContainer(container)
+      return v
+    if type(v) in self._converted:
+      v = self._outType(v)
+      v.setContainer(container)
+      return v
+    raise _OperationDenied("Wrong type @ %s: %s (needed %s)" % ( 
+        container, type(v), self._converted + self._unchanged) )
+  def pre_op(self, lst, start, end, replace): 
+    return map(lambda v: self._convert(v, lst), replace)
+
+class _PrimConverter(_TypeConverter):
+  def __init__(self, prim):
+    super(_PrimConverter, self).__init__(prim, [ prim ], [ int, long ])
+
+class _Utf8Converter(_TypeConverter):
+  def __init__(self):
+    super(_Utf8Converter, self).__init__(_Utf8, [ _Utf8 ], [ str ])
+
+class _ConstantPoolConverter(_Bouncer):
+  """ Converts incoming primtives into constant pool entries as necessary """
+  def __init__(self, cp):
+    super(_ConstantPoolConverter, self).__init__()
+    self.cp = cp
+  def _convert(self, v):
+    if isinstance(v, cp_info) or isinstance(v, CONSTANT_Null): return v
+    elif isinstance(v, (str, _Utf8)): return CONSTANT_Utf8_info(v)
+    elif isinstance(v, int): return CONSTANT_Integer_info(v)
+    elif isinstance(v, float): return CONSTANT_Float_info(v)
+    elif isinstance(v, long): return CONSTANT_Long_info(v)
+    else:
+      raise _OperationDenied("Invalid type: %s" % type(v))
+  def pre_op(self, lst, start, end, replace): 
+    return map(lambda v: self._convert(v), replace)
+
+class _MaintainTypeBouncer(_Bouncer):
+  """ Ensures types of components is a specific subtype """
+  def __init__(self, maintained):
+    super(_MaintainTypeBouncer, self).__init__()
+    self._type = maintained
+  def pre_op(self, lst, start, end, replace):
+    for x in replace:
+      if not isinstance(x, self._type):
+        raise _OperationDenied(
+          'Can only add elements of type %s' % self._type.__name__)
+    return replace
+
+class _ContainerMaintainer(_Bouncer):
+  """ Maintains the container relationship for list elements """
+  def __init__(self):
+    super(_ContainerMaintainer, self).__init__()
+  def pre_op(self, lst, start, end, replace):
+    for i in range(start, end):
+      lst[i].setContainer(None)
+    for x in replace: x.setContainer(lst)
+    return replace
+
+class _CodeOffsetAdjuster(_Bouncer):
+  """ Updates inter-bytecode references when code is adjusted """
+  def __init__(self):
+    super(_CodeOffsetAdjuster, self).__init__()
+  def _bci_at(self, code, idx):
+    bci=0
+    for bc in code[0:idx]:
+      bci += bc.size(bci)
+    return bci
+  def pre_op(self, code, start, end, replace):
+    bci_start = self._bci_at(code, start)
+    bci_end = bci_start
+    for i in range(start, end):
+      bci_end += code[i].size()
+    size = bci_end - bci_start
+    new_size = 0
+    for x in replace:
+      new_size += x.size()
+    old_size = 0
+    if len(code) > 0: 
+      last_idx = len(code) - 1
+      last_bci = self._bci_at(code, last_idx)
+      old_size = last_bci + code[last_idx].size(last_bci)
+    self._codeSizeChange(
+        code, bci_start + min(size, new_size), new_size - size, old_size)
+    return replace
+  def _codeSizeChange(self, code, location, delta, old_method_size):
+    if (delta == 0 or len(code) == 0 or 
+        location == code[-1]._bci + code[-1].size()):
+      return # No change, empty list, or appending
+    else:
+      # adjust inter-code offset
+      for x in code: x._codeSizeAdjusted(location, delta, old_method_size)
+      # adjust exception handlers
+      code_attr = code.container().container()
+      for handler in code_attr.exception_table:
+        handler._codeSizeAdjusted(location, delta, old_method_size)
+      # adjust attributes: LineNumberTable, StackMapTable, etc.
+      for attr in code_attr.attributes:
+        attr._codeSizeAdjusted(location, delta, old_method_size)
+
+class _BciMaintainer(_Bouncer):
+  """ Updates bytecode's _bci values """
+  def __init__(self):
+    super(_BciMaintainer, self).__init__()
+
+  def pre_op(self, code, start, end, replace):
+    if start == 0: bci = 0
+    elif (start >= len(code)):
+      bci = code[-1]._bci + code[-1].size()
+    else: bci = code[start]._bci
+    for x in replace:
+      x.setBci(bci)
+      bci += x.size()
+    for x in code.__getslice__(end, len(code)):
+      x.setBci(bci)
+      bci += x.size()
+    return replace
+      
+class _Factory(object):
+  """ Creates common class file structure patterns """
+  def generic(name, value, formatter = None):
+    return _Component(name, value, formatter, 
+                       [ _MaintainTypeBouncer(type(value)) ])
+  generic = staticmethod(generic)
+  def primitive(name, value, formatter = None):
+    return _Component(name, value, formatter, [ _PrimConverter(type(value)) ])
+  primitive = staticmethod(primitive)
+  def readOnly(name, value, formatter = None):
+    return _Component(name, value, formatter, [ _ReadOnlyBouncer() ])
+  readOnly = staticmethod(readOnly)
+  def cp_index(name, value=0):
+    return _Component(name, _CpIndex(value), None, [ _PrimConverter(_CpIndex) ])
+  cp_index = staticmethod(cp_index)
+  def branch(name, value=0):
+    return _Component(name, value, None, [ _PrimConverter(type(value)) ])
+  branch = staticmethod(branch)
+  def local(name, value=0):
+    return _Component(name, value, None, [ _PrimConverter(type(value)) ])
+  local = staticmethod(local)
+  def bci(name):
+    return _Component(name, u2(), None, [ _PrimConverter(u2) ])
+  bci = staticmethod(bci)
+  def accessFlagsForClass(name):
+    return _Component(name, u2(), _AccessFlagsFormatterForClass(),
+                       [ _PrimConverter(u2) ])
+  accessFlagsForClass = staticmethod(accessFlagsForClass)
+  def accessFlagsForField(name):
+    return _Component(name, u2(), _AccessFlagsFormatter(),
+                       [ _PrimConverter(u2) ])
+  accessFlagsForField = staticmethod(accessFlagsForField)
+  def accessFlagsForMethod(name):
+    return _Component(name, u2(), _AccessFlagsFormatterForMethod(),
+                       [ _PrimConverter(u2) ])
+  accessFlagsForMethod = staticmethod(accessFlagsForMethod)
+  def referenceKind(name, value=0):
+    return _Component(name, u1(value), _ReferenceKindFormatter(), 
+                      [ _PrimConverter(u1) ])
+  referenceKind = staticmethod(referenceKind)
+  def length(name, value):
+    return _AutoLengthComponent(name, value)
+  length = staticmethod(length)
+  def primitiveArray(name, element_type):
+    value = _CountedArray(element_type)
+    prim = _PrimConverter(element_type)
+    value._bouncers.append(prim)
+    return _Component(name, value, None, [ _MaintainTypeBouncer(type(value)) ])
+  primitiveArray = staticmethod(primitiveArray)
+  def cpIndexArray(name):
+    value = _CountedArray(_CpIndex)
+    value._bouncers += [ _PrimConverter(_CpIndex), _ContainerMaintainer() ]
+    return _Component(name, value, None, [ _MaintainTypeBouncer(type(value)) ])
+  cpIndexArray = staticmethod(cpIndexArray)
+  def structuredArray(name, element_type):
+    value = _CountedArray(element_type)
+    purity = [ _MaintainTypeBouncer(element_type), _ContainerMaintainer() ]
+    value._bouncers += purity
+    return _Component(name, value, None, [ _MaintainTypeBouncer(type(value)) ])
+  structuredArray = staticmethod(structuredArray)
+  def bytecodeArray(name):
+    value = _BytecodeArray()
+    purity = [ _BytecodeConverter(), _MaintainTypeBouncer(bytecode),
+               _ContainerMaintainer(), _BciMaintainer(), _CodeOffsetAdjuster() ]
+    value._bouncers += purity
+    return _Component(name, value, None, [ _MaintainTypeBouncer(type(value)) ])
+  bytecodeArray = staticmethod(bytecodeArray)
+  def constantPool(name):
+    element0 = CONSTANT_Null()
+    value = _CountedArray(cp_info, [ element0 ], 1)
+    element0.setContainer(value)
+    value._bouncers += [ _ConstantPoolConverter(value), _ContainerMaintainer() ]
+    return _Component(name, value, None, [ _MaintainTypeBouncer(type(value)) ])
+  constantPool = staticmethod(constantPool)
+
+#############################################################################
+#
+# Values and types defined by the JVMS
+#
+##
+
+### Access flags
+ACC_PUBLIC         = 0x0001
+ACC_PRIVATE        = 0x0002
+ACC_PROTECTED      = 0x0004
+ACC_STATIC         = 0x0008
+ACC_FINAL          = 0x0010
+ACC_SYNCHRONIZED   = 0x0020
+ACC_SUPER          = 0x0020
+ACC_VOLATILE       = 0x0040
+ACC_BRIDGE         = 0x0040
+ACC_TRANSIENT      = 0x0080
+ACC_VARARGS        = 0x0080
+ACC_NATIVE         = 0x0100
+ACC_INTERFACE      = 0x0200
+ACC_DEFENDER       = 0x0200
+ACC_ABSTRACT       = 0x0400
+ACC_STRICT         = 0x0800
+ACC_SYNTHETIC      = 0x1000
+ACC_ANNOTATION     = 0x2000
+ACC_ENUM           = 0x4000
+ACC_UNKNOWN_0x8000 = 0x8000
+
+### Array types
+T_BOOLEAN = _ArrayType(4)
+T_CHAR    = _ArrayType(5)
+T_FLOAT   = _ArrayType(6)
+T_DOUBLE  = _ArrayType(7)
+T_BYTE    = _ArrayType(8)
+T_SHORT   = _ArrayType(9)
+T_INT     = _ArrayType(10)
+T_LONG    = _ArrayType(11)
+
+### MethodHandle Reference kinds 
+REF_getField         = 1
+REF_getStatic        = 2
+REF_putField         = 3
+REF_putStatic        = 4
+REF_invokeVirtual    = 5
+REF_invokeStatic     = 6
+REF_invokeSpecial    = 7
+REF_newInvokeSpecial = 8
+REF_invokeInterface  = 9
+
+# StackMapTable types
+ITEM_Top               = 0
+ITEM_Integer           = 1
+ITEM_Float             = 2
+ITEM_Double            = 3
+ITEM_Long              = 4
+ITEM_Null              = 5
+ITEM_UninitializedThis = 6
+ITEM_Object            = 7
+ITEM_Uninitialized     = 8
+
+class ClassFile(_Composite):
+  def __init__(self, filename=None):
+    super(ClassFile, self).__init__()
+    self.addComponent(_Factory.readOnly(
+      'magic', u4(0xcafebabe), _HexFormatter()))
+    self.addComponent(_Factory.primitive('minor_version', u2()))
+    self.addComponent(_Factory.primitive('major_version', u2()))
+    self.addComponent(_Factory.length('constant_pool_count', u2()))
+    self.addComponent(_Factory.constantPool('constant_pool'))
+    self.addComponent(_Factory.accessFlagsForClass('access_flags'))
+    self.addComponent(_Factory.cp_index('this_class'))
+    self.addComponent(_Factory.cp_index('super_class'))
+    self.addComponent(_Factory.length('interfaces_count', u2()))
+    self.addComponent(_Factory.cpIndexArray('interfaces'))
+    self.addComponent(_Factory.length("fields_count", u2()))
+    self.addComponent(_Factory.structuredArray('fields', field_info))
+    self.addComponent(_Factory.length("methods_count", u2()))
+    self.addComponent(_Factory.structuredArray('methods', method_info))
+    self.addComponent(_Factory.length('attributes_count', u2()))
+    self.addComponent(_Factory.structuredArray('attributes', _AttributeBase))
+    self.publish()
+
+    if filename != None:
+      iter=_SafeFileIter(filename)
+      self.deserialize(iter)
+      if iter.bytesLeft() > 0:
+        print 'Parse error -- extra bytes at the end of ClassFile'
+      iter.close()
+
+  def classname(self):
+    name = '????'
+    cplen = len(self.constant_pool)
+    if self.this_class > 0 and self.this_class < cplen:
+      cp_entry = self.constant_pool[self.this_class]
+      if isinstance(cp_entry, CONSTANT_Class_info):
+        if cp_entry.name_index > 0 and cp_entry.name_index < cplen:
+          cp_entry = self.constant_pool[cp_entry.name_index]
+          if isinstance(cp_entry, CONSTANT_Utf8_info):
+            name = cp_entry.bytes.asString()
+    return name
+
+  def briefString(self):
+    return 'ClassFile(%s)' % self.classname()
+
+  def path(self):
+    return self.classname()
+
+  def write(self, filename=None):
+    if filename == None:
+      filename = self.classname() + ".class"
+    else:
+      if filename.find('.') == -1:
+        filename = filename + ".class"
+    _ClassFileWriter(self, filename)
+
+  def __iter__(self):
+    list = []
+    self.getIterationList(list)
+    return list.__iter__()
+
+class cp_info(_Composite):
+  """ Base class for constant pool values """
+  def __init__(self):
+    super(cp_info, self).__init__()
+    self.addComponent(
+      _Component("tag", u1(self.identifier()), None,
+        [ _ReadOnlyBouncer("Can't change cp_info tag") ]) )
+
+  def newInstance(cls, iter, container):
+    tag = u1()
+    tag = tag.deserialize(iter)
+    for x in cls.__subclasses__():
+      subs = x.__subclasses__()
+      if len(subs) == 0: subs = [ x ]
+      for c in subs:
+        if c.identifier() == tag:
+          sub = c()
+          sub.setContainer(container)
+          return sub.deserialize(iter)
+    sub = INVALID_cp_info()
+    sub.components()[0].value = u1(tag)
+    sub.setContainer(container)
+    return sub
+  newInstance = classmethod(newInstance)
+
+  def deserialize(self, iter):
+    for x in self.components()[1:]:
+      if iter.bytesLeft() <= 0:
+        print 'Parse error! Truncated file.'
+        break
+      x.value = x.value.deserialize(iter)
+    return self
+  def veryBriefString(self): return 'UNKNOWN'
+
+class CONSTANT_Null(cp_info):
+  """ Placeholder for the 0-index and Long/Double second words in the cp """
+  def identifier(): return 0
+  identifier = staticmethod(identifier)
+  def __init__( self ):
+    super(CONSTANT_Null, self).__init__()
+    self.publish()
+  def deserialize(self, iter): pass
+  def serialize(self, ostream): return 0
+  def toString(self, level=0, field=None):
+    return Settings.indent * level + "[Unused]"
+  def briefString(self, field=None): return self.toString(0, field)
+  def veryBriefString(self): return 'NULL'
+
+class INVALID_cp_info(cp_info):
+  def identifier(): return -1
+  identifier = staticmethod(identifier)
+  def __init__( self ):
+    super(INVALID_cp_info, self).__init__()
+    self.publish()
+  def briefString(self, field=None): return 'INVALID(%d)' % self.tag
+  def veryBriefString(self): return self.briefString()
+
+class CONSTANT_Utf8_info(cp_info):
+  def identifier(): return 1
+  identifier = staticmethod(identifier)
+  def __init__( self, data='' ):
+    super(CONSTANT_Utf8_info, self).__init__()
+    self.addComponent(_Factory.length('length', u2()))
+    self.addComponent(_Component(
+        'bytes', _Utf8(data), None, [ _Utf8Converter() ]))
+    self.publish()
+  def briefString(self, field=None): return 'UTF8(%s)' % self.bytes
+  def veryBriefString(self): return self.bytes
+
+class CONSTANT_Integer_info(cp_info):
+  def identifier(): return 3
+  identifier = staticmethod(identifier)
+  def __init__( self, data=0 ):
+    super(CONSTANT_Integer_info, self).__init__()
+    self.addComponent(_Factory.primitive('bytes', u4(data)))
+    self.publish()
+  def briefString(self, field=None): return 'Integer(%d)' % self.bytes
+  def veryBriefString(self): return '%d' % self.bytes
+
+class CONSTANT_Float_info(cp_info):
+  def identifier(): return 4
+  identifier = staticmethod(identifier)
+  def __init__( self, data=0.0 ):
+    super(CONSTANT_Float_info, self).__init__()
+    bits = struct.unpack('>I', struct.pack('>f', data))[0]
+    self.addComponent(_Factory.primitive('bytes', u4(bits)))
+    self.publish()
+  def briefString(self, field=None):
+    return 'Float(%s)' % self.veryBriefString()
+  def veryBriefString(self): 
+    v = struct.unpack('>f', struct.pack('>I', self.bytes))[0]
+    return '%f' % v
+
+class CONSTANT_Long_info(cp_info):
+  def identifier(): return 5
+  identifier = staticmethod(identifier)
+  def __init__( self, data=0L ):
+    super(CONSTANT_Long_info, self).__init__()
+    self.addComponent(_Component(
+        'high_bytes', u4(data >> 32), _HexFormatter(), [ _PrimConverter(u4) ]))
+    self.addComponent(_Component(
+        'low_bytes', u4(data), _HexFormatter(), [ _PrimConverter(u4) ]))
+    self.publish()
+  def briefString(self, field=None):
+    return 'Long(%dL)' % (long(self.high_bytes) << 32 | self.low_bytes)
+  def veryBriefString(self):
+    return '%dL' % (long(self.high_bytes) << 32 | self.low_bytes)
+
+class CONSTANT_Double_info(cp_info):
+  def identifier(): return 6
+  identifier = staticmethod(identifier)
+  def __init__( self, data=0.0 ):
+    super(CONSTANT_Double_info, self).__init__()
+    bits = struct.unpack('>Q', struct.pack('>d', data))[0]
+    self.addComponent(_Component(
+        'high_bytes', u4(bits >> 32), _HexFormatter(), [ _PrimConverter(u4) ]))
+    self.addComponent(_Component(
+        'low_bytes', u4(bits), _HexFormatter(), [ _PrimConverter(u4) ]))
+    self.publish()
+  def briefString(self, field=None):
+    return 'Double(%s)' % self.veryBriefString()
+  def veryBriefString(self):
+    bits = long(self.high_bytes) << 32 | self.low_bytes
+    v = struct.unpack('>d', struct.pack('>Q', bits))[0]
+    return '%g' % v
+
+class CONSTANT_Class_info(cp_info):
+  def identifier(): return 7
+  identifier = staticmethod(identifier)
+  def __init__( self, idx = 0 ):
+    super(CONSTANT_Class_info, self).__init__()
+    self.addComponent(_Factory.cp_index('name_index', idx))
+    self.publish()
+  def briefString(self, field=None): return 'Class(#%d)' % self.name_index
+  def veryBriefString(self):
+    return self.name_index.veryBriefString()
+
+class CONSTANT_String_info(cp_info):
+  def identifier(): return 8
+  identifier = staticmethod(identifier)
+  def __init__(self, idx=0):
+    super(CONSTANT_String_info, self).__init__()
+    self.addComponent(_Factory.cp_index('string_index', idx))
+    self.publish()
+  def briefString(self, field=None): return 'String(#%d)' % self.string_index
+  def veryBriefString(self):
+    return self.string_index.veryBriefString()
+
+class _CpRefEntry(cp_info):
+  def __init__(self, cls_index, name_index):
+    super(_CpRefEntry, self).__init__()
+    self.addComponent(_Factory.cp_index('class_index', cls_index))
+    self.addComponent(_Factory.cp_index('name_and_type_index', name_index))
+    self.publish()
+
+  def do_briefString(self, name, field=None):
+    return '%s(#%d, #%d)' % (name, self.class_index, self.name_and_type_index)
+  def veryBriefString(self):
+    return self.class_index.veryBriefString() + '.' + \
+           self.name_and_type_index.veryBriefString()
+
+class CONSTANT_Fieldref_info(_CpRefEntry):
+  def identifier(): return 9
+  identifier = staticmethod(identifier)
+  def __init__(self, cls_idx=0, name_idx=0):
+    super(CONSTANT_Fieldref_info, self).__init__(cls_idx, name_idx)
+  def briefString(self, field=None): return self.do_briefString('Field', field)
+
+class CONSTANT_Methodref_info(_CpRefEntry):
+  def identifier(): return 10
+  identifier = staticmethod(identifier)
+  def __init__(self, cls_idx=0, name_idx=0):
+    super(CONSTANT_Methodref_info, self).__init__(cls_idx, name_idx)
+  def briefString(self, field=None): return self.do_briefString('Method', field)
+
+class CONSTANT_InterfaceMethodref_info(_CpRefEntry):
+  def identifier(): return 11
+  identifier = staticmethod(identifier)
+  def __init__(self, cls_idx=0, name_idx=0):
+    super(CONSTANT_InterfaceMethodref_info, self).__init__(cls_idx, name_idx)
+  def briefString(self, field=None):
+    return self.do_briefString('InterfaceMethod', field)
+
+class CONSTANT_NameAndType_info(cp_info):
+  def identifier(): return 12
+  identifier = staticmethod(identifier)
+  def __init__(self, name_idx = 0, descriptor_idx = 0):
+    super(CONSTANT_NameAndType_info, self).__init__()
+    self.addComponent(_Factory.cp_index('name_index', name_idx))
+    self.addComponent(_Factory.cp_index('descriptor_index', descriptor_idx))
+    self.publish()
+  def briefString(self, field=None):
+    return 'NameAndType(#%d, #%d)' % (self.name_index, self.descriptor_index)
+  def veryBriefString(self):
+    return self.name_index.veryBriefString() + ' ' + \
+           self.descriptor_index.veryBriefString()
+
+class CONSTANT_MethodHandle_info(cp_info):
+  def identifier(): return 15
+  identifier = staticmethod(identifier)
+  def __init__(self, ref_kind=0, ref_index=0):
+    super(CONSTANT_MethodHandle_info, self).__init__()
+    self.addComponent(_Factory.referenceKind('reference_kind', ref_kind))
+    self.addComponent(_Factory.cp_index('reference_index', ref_index))
+    self.publish()
+  def briefString(self, field=None): 
+    return 'MethodHandle(%s, #%d)' % \
+        (self.components()[1], self.reference_index)
+  def veryBriefString(self):
+    return '%s %s' % \
+        ( self.components()[1], self.reference_index.veryBriefString())
+
+class CONSTANT_MethodType_info(cp_info):
+  def identifier(): return 16
+  identifier = staticmethod(identifier)
+  def __init__(self, descriptor_idx=0):
+    super(CONSTANT_MethodType_info, self).__init__()
+    self.addComponent(_Factory.cp_index('descriptor_index', descriptor_idx))
+    self.publish()
+  def briefString(self, field=None):
+    return 'MethodType(#%d)' % self.descriptor_index
+  def veryBriefString(self):
+    return self.descriptor_index.veryBriefString()
+
+class CONSTANT_InvokeDynamic_info(cp_info):
+  def identifier(): return 18
+  identifier = staticmethod(identifier)
+  def __init__(self, bootstrap_idx=0, nat_index=0):
+    super(CONSTANT_InvokeDynamic_info, self).__init__()
+    self.addComponent(_Factory.primitive( \
+        'bootstrap_method_attr_index', u2(bootstrap_idx)))
+    self.addComponent(_Factory.cp_index('name_and_type_index', nat_index))
+    self.publish()
+  def briefString(self, field=None):
+    return 'InvokeDynamic(%d, #%d)' % \
+        (self.bootstrap_method_attr_index, self.name_and_type_index)
+  def veryBriefString(self):
+    return '%d %s' % ( self.bootstrap_method_attr_index, \
+                       self.name_and_type_index.veryBriefString() )
+      
+### Field and method info
+class field_info(_Composite):
+  def __init__(self):
+    super(field_info, self).__init__()
+    self.addComponent(_Factory.accessFlagsForField('access_flags'))
+    self.addComponent(_Factory.cp_index('name_index'))
+    self.addComponent(_Factory.cp_index('descriptor_index'))
+    self.addComponent(_Factory.length('attributes_count', u2()))
+    self.addComponent(_Factory.structuredArray('attributes', _AttributeBase))
+    self.publish()
+
+  def briefString(self):
+    return 'field_info( %s, %s )' % \
+        ( self.name_index.veryBriefString(), \
+          self.descriptor_index.veryBriefString() )
+
+
+class method_info(_Composite):
+  def __init__(self):
+    super(method_info, self).__init__()
+    self.addComponent(_Factory.accessFlagsForMethod('access_flags'))
+    self.addComponent(_Factory.cp_index('name_index'))
+    self.addComponent(_Factory.cp_index('descriptor_index'))
+    self.addComponent(_Factory.length('attributes_count', u2()))
+    self.addComponent(_Factory.structuredArray('attributes', _AttributeBase))
+    self.publish()
+
+  def briefString(self):
+    return 'method_info( %s, %s )' % \
+        ( self.name_index.veryBriefString(), \
+          self.descriptor_index.veryBriefString() )
+
+### Attributes
+class _AttributeBase(_Composite):
+  def __init__(self, identifier = 0):
+    super(_AttributeBase, self).__init__()
+    self.addComponent(_Factory.cp_index('attribute_name_index', identifier))
+
+  def name(cls): 
+    if (cls == _AttributeBase):
+      return 'attribute_info'
+    else:
+      return cls.__name__
+  name = classmethod(name)
+
+  def newInstance(cls, iter, container):
+    id = u2().deserialize(iter)
+    if container != None and container.classfile() != None:
+      cp = container.classfile().constant_pool
+      if id >= 0 and id < len(cp):
+        cpEntry = cp[id]
+        subs = cls.__subclasses__()
+        if cpEntry.tag == 1:
+          for s in subs:
+            if s.identifier() == cpEntry.bytes:
+              c = s(id)
+              c.setContainer(container)
+              c = c.deserialize(iter)
+              return c
+    c = attribute_info(id)
+    c.setContainer(container)
+    c = c.deserialize(iter)
+    return c
+  newInstance = classmethod(newInstance)
+
+  def deserialize(self, iter):
+    for x in self.components()[1:]:
+      if iter.bytesLeft() <= 0:
+        print 'Parse error! Truncated file.'
+        break
+      x.value = x.value.deserialize(iter)
+    return self
+  def briefString(self):
+    return '%s = { ... }' % type(self).__name__
+  def _codeSizeAdjusted(self, bci, delta, old_method_size): pass
+
+class attribute_info(_AttributeBase):
+  """ Unrecognized attribute """
+  def identifier(): return ''
+  identifier = staticmethod(identifier)
+  def __init__(self, identifier):
+    super(attribute_info, self).__init__(identifier)
+    self.addComponent(_Factory.length('attribute_length', u4()))
+    self.addComponent(_Factory.primitiveArray('info', u1))
+    self.publish()
+
+  def briefString(self):
+    return 'attribute_info( %s, ... )' % \
+        self.attribute_name_index.veryBriefString()
+
+class ConstantValue_attribute(_AttributeBase):
+  def identifier(): return 'ConstantValue'
+  identifier = staticmethod(identifier)
+  def __init__(self, name_index, cp_index=0):
+    super(ConstantValue_attribute, self).__init__(name_index)
+    self.addComponent(_Factory.readOnly('attribute_length', u4(2)))
+    self.addComponent(_Factory.cp_index('constantvalue_index'))
+    self.publish()
+  def briefString(self):
+    return 'ConstantValue_attribute: %s' % \
+        self.constantvalue_index.briefString()
+
+class exception_table_entry(_Composite):
+  def __init__(self):
+    super(exception_table_entry, self).__init__()
+    self.addComponent(_Factory.bci('start_pc'))
+    self.addComponent(_Factory.bci('end_pc'))
+    self.addComponent(_Factory.bci('handler_pc'))
+    self.addComponent(_Factory.cp_index('catch_type'))
+    self.publish()
+  def briefString(self):
+    return 'exception_handler { start=%d, end=%d, handler=%d, type=%s }' % \
+        ( self.start_pc, self.end_pc, self.handler_pc, 
+          self.catch_type.veryBriefString() )
+  def _codeSizeAdjusted(self, bci, delta, old_method_size): 
+    if self.start_pc >= bci: self.start_pc = max(bci, self.start_pc + delta)
+    if self.end_pc >= bci: self.end_pc = max(bci, self.end_pc + delta)
+    if self.handler_pc >= bci: 
+      self.handler_pc = max(bci, self.handler_pc + delta)
+    # remove entries which might no longer apply
+    if (self.start_pc >= old_method_size + delta or
+        self.handler_pc >= old_method_size + delta or
+        self.start_pc == self.end_pc):
+      del self.container()[self.container().index(self)]
+
+class Code_attribute(_AttributeBase):
+  def identifier(): return 'Code'
+  identifier = staticmethod(identifier)
+  def __init__(self, name_index):
+    super(Code_attribute, self).__init__(name_index)
+    self.addComponent(_AutoSizeComponent('attribute_length', u4(), 2, 10))
+    self.addComponent(_Factory.primitive('max_stack', u2()))
+    self.addComponent(_Factory.primitive('max_locals', u2()))
+    self.addComponent(_AutoSizeComponent('code_length', u4(), 5, 6))
+    self.addComponent(_Factory.bytecodeArray('code'))
+    self.addComponent(_Factory.length('exception_table_length', u2()))
+    self.addComponent(_Factory.structuredArray(
+      'exception_table', exception_table_entry))
+    self.addComponent(_Factory.length('attributes_count', u2()))
+    self.addComponent(_Factory.structuredArray('attributes', _AttributeBase))
+    self.publish()
+
+class Exceptions_attribute(_AttributeBase):
+  def identifier(): return 'Exceptions'
+  identifier = staticmethod(identifier)
+  def __init__(self, name_index):
+    super(Exceptions_attribute, self).__init__(name_index)
+    self.addComponent(_AutoSizeComponent('attribute_length', u4(), 2, 4))
+    self.addComponent(_Factory.length('number_of_exceptions', u2()))
+    self.addComponent(_Factory.primitiveArray('exceptions_index_table', u2))
+    self.publish()
+
+class classes_entry(_Composite):
+  def __init__(self):
+    super(classes_entry, self).__init__()
+    self.addComponent(_Factory.cp_index('inner_class_info_index'))
+    self.addComponent(_Factory.cp_index('outer_class_info_index'))
+    self.addComponent(_Factory.cp_index('inner_name_index'))
+    self.addComponent(_Factory.accessFlagsForClass('inner_class_access_flags'))
+    self.publish()
+
+
+class InnerClasses_attribute(_AttributeBase):
+  def identifier(): return 'InnerClasses'
+  identifier = staticmethod(identifier)
+  def __init__(self, name_index):
+    super(InnerClasses_attribute, self).__init__(name_index)
+    self.addComponent(_AutoSizeComponent('attribute_length', u4(), 2, 4))
+    self.addComponent(_Factory.length('number_of_classes', u2()))
+    self.addComponent(_Factory.structuredArray('classes', classes_entry))
+    self.publish()
+
+class EnclosingMethod_attribute(_AttributeBase):
+  def identifier(): return 'EnclosingMethod'
+  identifier = staticmethod(identifier)
+  def __init__(self, name_index, cls_idx=0, method_idx=0):
+    super(EnclosingMethod_attribute, self).__init__(name_index)
+    self.addComponent(_Factory.readOnly('attribute_length', u4(4)))
+    self.addComponent(_Factory.cp_index('class_index', cls_idx))
+    self.addComponent(_Factory.cp_index('method_index', method_idx))
+    self.publish()
+
+class Synthetic_attribute(_AttributeBase):
+  def identifier(): return 'Synthetic'
+  identifier = staticmethod(identifier)
+  def __init__(self, name_index):
+    super(Synthetic_attribute, self).__init__(name_index)
+    self.addComponent(_Factory.readOnly('attribute_length', u4(0)))
+    self.publish()
+
+class Signature_attribute(_AttributeBase):
+  def identifier(): return 'Signature'
+  identifier = staticmethod(identifier)
+  def __init__(self, name_index, sig_idx=0):
+    super(Signature_attribute, self).__init__(name_index)
+    self.addComponent(_Factory.readOnly('attribute_length', u4(2)))
+    self.addComponent(_Factory.cp_index('signature_index', sig_idx))
+    self.publish()
+
+class SourceFile_attribute(_AttributeBase):
+  def identifier(): return 'SourceFile'
+  identifier = staticmethod(identifier)
+  def __init__(self, name_index):
+    super(SourceFile_attribute, self).__init__(name_index)
+    self.addComponent(_Factory.readOnly('attribute_length', u4(2)))
+    self.addComponent(_Factory.cp_index('sourcefile_index'))
+    self.publish()
+  def briefString(self):
+    return 'SourceFile_attribute: %s' % self.sourcefile_index.briefString()
+
+class line_number_table_entry(_Composite):
+  def __init__(self):
+    super(line_number_table_entry, self).__init__()
+    self.addComponent(_Factory.bci('start_pc'))
+    self.addComponent(_Factory.primitive('line_number', u2()))
+    self.publish()
+  def briefString(self):
+    return 'line_number { start_pc=%d, line_number=%d }' % \
+        ( self.start_pc, self.line_number )
+
+class LineNumberTable_attribute(_AttributeBase):
+  def identifier(): return 'LineNumberTable'
+  identifier = staticmethod(identifier)
+  def __init__(self, name_index):
+    super(LineNumberTable_attribute, self).__init__(name_index)
+    self.addComponent(_AutoSizeComponent('attribute_length', u4(), 2, 4))
+    self.addComponent(_Factory.length('line_number_table_length', u2()))
+    self.addComponent(_Factory.structuredArray(
+      'line_number_table', line_number_table_entry))
+    self.publish()
+  def _codeSizeAdjusted(self, bci, delta, old_method_size): 
+    for entry in self.line_number_table:
+      if entry.start_pc >= bci: 
+        entry.start_pc = max(bci, entry.start_pc + delta)
+
+class local_variable_table_entry(_Composite):
+  def __init__(self):
+    super(local_variable_table_entry, self).__init__()
+    self.addComponent(_Factory.bci('start_pc'))
+    self.addComponent(_Factory.primitive('length', u2()))
+    self.addComponent(_Factory.cp_index('name_index'))
+    self.addComponent(_Factory.cp_index('descriptor_index'))
+    self.addComponent(_Factory.primitive('index', u2()))
+    self.publish()
+  def briefString(self): return 'local_variable { ... }'
+
+class LocalVariableTable_attribute(_AttributeBase):
+  def identifier(): return 'LocalVariableTable'
+  identifier = staticmethod(identifier)
+  def __init__(self, name_index):
+    super(LocalVariableTable_attribute, self).__init__(name_index)
+    self.addComponent(_AutoSizeComponent('attribute_length', u4(), 2, 4))
+    self.addComponent(_Factory.length('local_variable_table_length', u2()))
+    self.addComponent(_Factory.structuredArray(
+      'local_variable_table', local_variable_table_entry))
+    self.publish()
+  def _codeSizeAdjusted(self, bci, delta, old_method_size): 
+    for table in self.local_variable_table:
+      if bci < table.start_pc: 
+        table.start_pc = max(bci, table.start_pc + delta)
+      elif bci < (table.start_pc + table.length):
+        table.length += max(-table.length, delta)
+      if table.length == 0 or table.start_pc >= old_method_size + delta:
+        idx = self.local_variable_table.index(table)
+        del self.local_variable_table[idx]
+
+class local_variable_type_table_entry(_Composite):
+  def __init__(self):
+    super(local_variable_type_table_entry, self).__init__()
+    self.addComponent(_Factory.bci('start_pc'))
+    self.addComponent(_Factory.primitive('length', u2()))
+    self.addComponent(_Factory.cp_index('name_index'))
+    self.addComponent(_Factory.cp_index('signature_index'))
+    self.addComponent(_Factory.primitive('index', u2()))
+    self.publish()
+  def briefString(self): return 'local_variable_type { ... }'
+
+class LocalVariableTypeTable_attribute(_AttributeBase):
+  def identifier(): return 'LocalVariableTypeTable'
+  identifier = staticmethod(identifier)
+  def __init__(self, name_index):
+    super(LocalVariableTypeTable_attribute, self).__init__(name_index)
+    self.addComponent(_AutoSizeComponent('attribute_length', u4(), 2, 4))
+    self.addComponent(_Factory.length('local_variable_type_table_length', u2()))
+    self.addComponent(_Factory.structuredArray(
+      'local_variable_type_table', local_variable_type_table_entry))
+    self.publish()
+  def _codeSizeAdjusted(self, bci, delta, old_method_size): 
+    for table in self.local_variable_type_table:
+      if bci < table.start_pc: 
+        table.start_pc = max(bci, table.start_pc + delta)
+      elif bci < (table.start_pc + table.length):
+        table.length += max(-table.length, delta)
+      if table.length == 0 or table.start_pc >= old_method_size + delta:
+        idx = self.local_variable_type_table.index(table)
+        del self.local_variable_type_table[idx]
+
+class Deprecated_attribute(_AttributeBase):
+  def identifier(): return 'Deprecated'
+  identifier = staticmethod(identifier)
+  def __init__(self, name_index):
+    super(Deprecated_attribute, self).__init__(name_index)
+    self.addComponent(_Factory.readOnly('attribute_length', u4(0)))
+    self.publish()
+  def briefString(self): return 'Deprecated_attribute {}'
+
+
+class element_value(_Composite):
+  def __init__(self):
+    super(element_value, self).__init__()
+    self.addComponent(_Factory.readOnly('tag', u1(), _AsciiFormatter()))
+
+  def deserialize(self, iter):
+    t = u1().deserialize(iter)
+    if t == 0x42 or t == 0x43 or t == 0x44 or t == 0x46 or \
+       t == 0x49 or t == 0x4a or t == 0x53 or t == 0x5a or t == 0x73:
+      value = const_value_index_value(t)
+    elif t == 0x65:
+      value = enum_const_value()
+    elif t == 0x63:
+      value = class_info_index_value()
+    elif t == 0x40:
+      value = annotation_value()
+    elif t == 0x5b:
+      value = array_value()
+    else:
+      value = INVALID_value()
+
+    value.setContainer(self.container())
+    for x in value.components()[1:]:
+      x.value = x.value.deserialize(iter)
+    return value
+
+class const_value_index_value(element_value):
+  def __init__(self, t=0x42, cpidx = 0):
+    super(const_value_index_value, self).__init__()
+    self.addComponent(_Factory.cp_index('const_value_index', cpidx))
+    self.publish()
+    self.component(0).value = u1(t)
+    self.component(0).value.setContainer(self)
+
+class enum_const_value(element_value):
+  def __init__(self, type_idx=0, const_idx=0):
+    super(enum_const_value, self).__init__()
+    self.addComponent(_Factory.cp_index('type_name_index', type_idx))
+    self.addComponent(_Factory.cp_index('const_name_index', type_idx))
+    self.publish()
+    self.component(0).value = u1(0x65)
+    self.component(0).value.setContainer(self)
+
+class class_info_index_value(element_value):
+  def __init__(self, cpidx = 0):
+    super(class_info_index_value, self).__init__()
+    self.addComponent(_Factory.cp_index('class_value_index', cpidx))
+    self.publish()
+    self.component(0).value = u1(0x63)
+    self.component(0).value.setContainer(self)
+
+class annotation_value(element_value):
+  def __init__(self):
+    super(annotation_value, self).__init__()
+    self.addComponent(_Factory.generic('annotation_value', annotation()))
+    self.publish()
+    self.component(0).value = u1(0x40)
+    self.component(0).value.setContainer(self)
+
+class array_value(element_value):
+  def __init__(self):
+    super(array_value, self).__init__()
+    self.addComponent(_Factory.length('num_values', u2()))
+    self.addComponent(_Factory.structuredArray('values', element_value))
+    self.publish()
+    self.component(0).value = u1(0x5b)
+    self.component(0).value.setContainer(self)
+
+class INVALID_value(element_value):
+  def __init__(self):
+    super(annotation_value, self).__init__()
+    self.publish()
+
+class element_value_pair(_Composite):
+  def __init__(self):
+    super(element_value_pair, self).__init__()
+    self.addComponent(_Factory.cp_index('element_name_index'))
+    self.addComponent(_Factory.generic('value', element_value()))
+    self.publish()
+
+class annotation(_Composite):
+  def __init__(self):
+    super(annotation, self).__init__()
+    self.addComponent(_Factory.cp_index('type_index'))
+    self.addComponent(_Factory.length('num_element_value_pairs', u2()))
+    self.addComponent(_Factory.structuredArray(
+      'element_value_pairs', element_value_pair))
+    self.publish()
+
+class RuntimeVisibleAnnotations_attribute(_AttributeBase):
+  def identifier(): return 'RuntimeVisibleAnnotations'
+  identifier = staticmethod(identifier)
+  def __init__(self, name_index):
+    super(RuntimeVisibleAnnotations_attribute, self).__init__(name_index)
+    self.addComponent(_AutoSizeComponent('attribute_length', u4(), 2, 4))
+    self.addComponent(_Factory.length('num_annotations', u2()))
+    self.addComponent(_Factory.structuredArray('annotations', annotation))
+    self.publish()
+
+class RuntimeInvisibleAnnotations_attribute(_AttributeBase):
+  def identifier(): return 'RuntimeInvisibleAnnotations'
+  identifier = staticmethod(identifier)
+  def __init__(self, name_index):
+    super(RuntimeInvisibleAnnotations_attribute, self).__init__(name_index)
+    self.addComponent(_AutoSizeComponent('attribute_length', u4(), 2, 4))
+    self.addComponent(_Factory.length('num_annotations', u2()))
+    self.addComponent(_Factory.structuredArray('annotations', annotation))
+    self.publish()
+
+class parameter_annotation(_Composite):
+  def __init__(self):
+    super(parameter_annotation, self).__init__()
+    self.addComponent(_Factory.length('num_annotations', u2()))
+    self.addComponent(_Factory.structuredArray('annotations', annotation))
+    self.publish()
+
+class RuntimeVisibleParameterAnnotations_attribute(_AttributeBase):
+  def identifier(): return 'RuntimeVisibleParameterAnnotations'
+  identifier = staticmethod(identifier)
+  def __init__(self, name_idx):
+    super(RuntimeVisibleParameterAnnotations_attribute, self).__init__(name_idx)
+    self.addComponent(_AutoSizeComponent('attribute_length', u4(), 2, 4))
+    self.addComponent(_Factory.length('num_parameters', u1()))
+    self.addComponent(_Factory.structuredArray(
+      'parameter_annotations', parameter_annotation))
+    self.publish()
+
+class RuntimeInvisibleParameterAnnotations_attribute(_AttributeBase):
+  def identifier(): return 'RuntimeInvisibleParameterAnnotations'
+  identifier = staticmethod(identifier)
+  def __init__(self, idx):
+    super(RuntimeInvisibleParameterAnnotations_attribute, self).__init__(idx)
+    self.addComponent(_AutoSizeComponent('attribute_length', u4(), 2, 4))
+    self.addComponent(_Factory.length('num_parameters', u1()))
+    self.addComponent(_Factory.structuredArray(
+      'parameter_annotations', parameter_annotation))
+    self.publish()
+
+class AnnotationDefault_attribute(_AttributeBase):
+  def identifier(): return "AnnotationDefault"
+  identifier = staticmethod(identifier)
+  def __init__(self, idx):
+    super(AnnotationDefault_attribute, self).__init__(idx)
+    self.addComponent(_AutoSizeComponent('attribute_length', u4(), 2, 3))
+    self.addComponent(_Factory.generic('default_value', element_value()))
+    self.publish()
+
+class SourceDebugExtension_attribute(_AttributeBase):
+  def identifier(): return "SourceDebugExtension"
+  identifier = staticmethod(identifier)
+  def __init__(self, name_index):
+    super(SourceDebugExtension_attribute, self).__init__(name_index)
+    self.addComponent(_AutoSizeComponent('attribute_length', u4(), 2, 3))
+    self.addComponent(_Factory.primitiveArray('debug_extension', u1))
+    self.publish() 
+
+class StackMapTable_attribute(_AttributeBase):
+  def identifier(): return 'StackMapTable'
+  identifier = staticmethod(identifier)
+  def __init__(self, name_index):
+    super(StackMapTable_attribute, self).__init__(name_index)
+    self.addComponent(_AutoSizeComponent('attribute_length', u4(), 2, 4))
+    self.addComponent(_Factory.length('number_of_entries', u2()))
+    self.addComponent(_Factory.structuredArray('entries', stack_map_frame))
+    self.publish()
+  def _codeSizeAdjusted(self, change_bci, delta, old_method_size):
+    current_bci = 0
+    change_amount = delta
+    # determine if any frames ought be deleted
+    for frame in self.entries:
+      if change_amount == 0: break
+      new_frame_offset = frame.offset()
+      if (change_bci >= current_bci and 
+          change_bci < current_bci + frame.offset()):
+        min_offset = change_bci - current_bci
+        new_frame_offset = max(min_offset, frame.offset() + change_amount)
+        change_amount -= new_frame_offset - frame.offset()
+        if new_frame_offset == 0:
+          idx = self.entries.index(frame)
+          if idx > 1: 
+            new_frame_offset = self.entries[idx - 1].offset()
+            del self.entries[idx - 1]
+        frame.set_offset(new_frame_offset)
+      current_bci += new_frame_offset
+    # Check to see if last entry needs to be deleted
+    if len(self.entries) > 0 and current_bci >= old_method_size + delta:
+      del self.entries[-1]
+    
+
+### Verification types
+class verification_type_info(_Composite):
+  def __init__(self, tag):
+    super(verification_type_info, self).__init__()
+    self.addComponent(_Factory.readOnly('tag', u1(tag)))
+  def deserialize(self, iter):
+    # tag component has already been read at this point
+    for x in self.components()[1:]:
+      if iter.bytesLeft() <= 0:
+        print 'Parse error! Truncated file.'
+        break
+      x.value = x.value.deserialize(iter)
+    return self
+  def newInstance(cls, iter, container):
+    tag = u1().deserialize(iter)
+    ret = Invalid_variable_info(tag)
+    if tag == ITEM_Top:   ret = Top_variable_info()
+    elif tag == ITEM_Integer: ret = Integer_variable_info()
+    elif tag == ITEM_Float: ret = Float_variable_info()
+    elif tag == ITEM_Double: ret = Double_variable_info()
+    elif tag == ITEM_Long: ret = Long_variable_info()
+    elif tag == ITEM_Null: ret = Null_variable_info()
+    elif tag == ITEM_UninitializedThis: ret = UninitializedThis_variable_info()
+    elif tag == ITEM_Object: ret = Object_variable_info()
+    elif tag == ITEM_Uninitialized: ret = Uninitialized_variable_info()
+    ret.setContainer(container)
+    ret = ret.deserialize(iter)
+    return ret
+  newInstance = classmethod(newInstance)
+
+class Invalid_variable_info(verification_type_info):
+  def __init__(self, tag):
+    super(Invalid_variable_info, self).__init__(tag)
+    self.publish()
+  def briefString(self): return 'INVALID_ITEM(%d)' % self.tag
+
+class Top_variable_info(verification_type_info):
+  def __init__(self):
+    super(Top_variable_info, self).__init__(ITEM_Top)
+    self.publish()
+  def briefString(self): return 'ITEM_Top'
+
+class Integer_variable_info(verification_type_info):
+  def __init__(self):
+    super(Integer_variable_info, self).__init__(ITEM_Integer)
+    self.publish()
+  def briefString(self): return 'ITEM_Integer'
+
+class Float_variable_info(verification_type_info):
+  def __init__(self):
+    super(Float_variable_info, self).__init__(ITEM_Float)
+    self.publish()
+  def briefString(self): return 'ITEM_Float'
+
+class Double_variable_info(verification_type_info):
+  def __init__(self):
+    super(Double_variable_info, self).__init__(ITEM_Double)
+    self.publish()
+  def briefString(self): return 'ITEM_Double'
+
+class Long_variable_info(verification_type_info):
+  def __init__(self):
+    super(Long_variable_info, self).__init__(ITEM_Long)
+    self.publish()
+  def briefString(self): return 'ITEM_Long'
+
+class Null_variable_info(verification_type_info):
+  def __init__(self):
+    super(Null_variable_info, self).__init__(ITEM_Null)
+    self.publish()
+  def briefString(self): return 'ITEM_Null'
+
+class UninitializedThis_variable_info(verification_type_info):
+  def __init__(self):
+    super(UninitializedThis_variable_info, self).__init__(ITEM_UninitializedThis)
+    self.publish()
+  def briefString(self): return 'ITEM_UninitializedThis'
+
+class Object_variable_info(verification_type_info):
+  def __init__(self):
+    super(Object_variable_info, self).__init__(ITEM_Object)
+    self.addComponent(_Factory.cp_index('cpool_index'))
+    self.publish()
+  def briefString(self): return 'ITEM_Object(#%d)' % self.cpool_index
+
+class Uninitialized_variable_info(verification_type_info):
+  def __init__(self):
+    super(Uninitialized_variable_info, self).__init__(ITEM_Uninitialized)
+    self.addComponent(_Factory.primitive('offset', u2()) )
+    self.publish()
+  def briefString(self): return 'ITEM_Uninitialized(%d)' % self.offset
+
+### Stack map frames
+class stack_map_frame(_Composite):
+  def __init__(self, frame_type):
+    super(stack_map_frame, self).__init__()
+    self.addComponent(_Factory.readOnly('frame_type', u1(frame_type)))
+  def deserialize(self, iter):
+    # Frame_type component has already been read at this point
+    for x in self.components()[1:]:
+      if iter.bytesLeft() <= 0:
+        print 'Parse error! Truncated file.'
+        break
+      x.value = x.value.deserialize(iter)
+    return self
+  def context_offset(self):
+    if self.container() is None or self.container().index(self) == 0:
+      return self.offset() - 1
+    else:
+      array = self.container()
+      return self.offset() + array[array.index(self) - 1].context_offset();
+    
+
+  def newInstance(cls, iter, container):
+    tag = u1().deserialize(iter)
+    if tag >= 0 and tag < 64:
+      ret = same_frame(tag)
+    elif tag < 128:
+      ret = same_locals_1_stack_item_frame(tag - 64)
+    elif tag == 247:
+      ret = same_locals_1_stack_item_frame_extended(0)
+    elif tag < 251:
+      ret = chop_frame(251 - tag, 0)
+    elif tag == 251:
+      ret = same_frame_extended(0)
+    elif tag < 255:
+      ret = append_frame(tag - 251, 0)
+    elif tag == 255:
+      ret = full_frame(0)
+    else: ret = invalid_frame(tag)
+    ret.setContainer(container)
+    ret = ret.deserialize(iter)
+    return ret
+  newInstance = classmethod(newInstance)
+
+class invalid_frame(stack_map_frame):
+  def __init__(self, frame_type):
+    super(invalid_frame, self).__init__(frame_type)
+    self.publish()
+  def briefString(self):
+    return 'INVALID_frame(frame_type=%d)' % self.frame_type
+  def offset(self): return 0
+  def set_offset(self, new_offset): pass
+
+class same_frame(stack_map_frame):
+  def __init__(self, frame_type):
+    if frame_type >= 64:
+      raise _OperationDenied("Invalid offset for same_frame()") 
+    super(same_frame, self).__init__(frame_type)
+    self.publish()
+  def briefString(self):
+    return 'same_frame(offset=%d)' % self.context_offset()
+  def offset(self): return self.frame_type + 1
+  def set_offset(self, new_offset):
+    if new_offset >= 64:
+      t=self.container()
+      t[t.index(self)] = same_frame_extended(new_offset)
+    else: self.component(0).value = u1(new_offset)
+
+class same_locals_1_stack_item_frame(stack_map_frame):
+  def __init__(self, offset):
+    if offset >= 64:
+      raise _OperationDenied("Invalid offset for same_frame()") 
+    super(same_locals_1_stack_item_frame, self).__init__(offset + 64)
+    self.addComponent(_Factory.generic(
+      'stack', _FixedSizeArray(verification_type_info, 1)))
+    self.publish()
+  def briefString(self):
+    return 'same_locals_1_stack_item_frame(offset=%d, stack=[%s])' % \
+        ( self.context_offset(), self.stack[0].briefString() )
+  def offset(self): return self.frame_type - 64 + 1
+  def set_offset(self, new_offset): 
+    if new_offset >= 64:
+      t=self.container()
+      idx = t.index(self)
+      t[idx] = same_locals_1_stack_item_frame_extended(new_offset)
+      t[idx].stack.append(self.stack[0])
+    else: self.component(0).value = u1(new_offset + 64 - 1)
+
+class same_locals_1_stack_item_frame_extended(stack_map_frame):
+  def __init__(self, offset):
+    super(same_locals_1_stack_item_frame_extended, self).__init__(247)
+    self.addComponent(_Factory.primitive('offset_delta', u2()))
+    self.addComponent(_Factory.generic(
+      'stack', _FixedSizeArray(verification_type_info, 1)))
+    self.publish()
+    self.offset_delta=offset
+  def briefString(self):
+    return 'same_locals_1_stack_item_frame_extended(offset=%d, stack=[%s])' % \
+        ( self.context_offset(), self.stack[0].briefString() )
+  def offset(self): return self.offset_delta
+  def set_offset(self, new_offset): 
+    if new_offset < 64:
+      t=self.container()
+      idx = t.index(self)
+      t[idx] = same_locals_1_stack_item_frame(new_offset)
+      t[idx].stack.append(self.stack[0])
+    else: self.offset_delta = new_offset
+
+class chop_frame(stack_map_frame):
+  def __init__(self, num_chops, offset):
+    if num_chops < 1 or num_chops > 3: 
+      raise _OperationDenied("Invalid chop amount for chop_frame()") 
+    super(chop_frame, self).__init__(num_chops + 247)
+    self.addComponent(_Factory.primitive('offset_delta', u2()))
+    self.publish()
+    self.offset_delta=offset
+  def briefString(self):
+    return 'chop_frame(offset=%d, chop=%d)' % \
+        ( self.context_offset(), 251 - self.frame_type)
+  def offset(self): return self.offset_delta
+  def set_offset(self, new_offset): self.offset_delta = new_offset
+
+class same_frame_extended(stack_map_frame):
+  def __init__(self, offset):
+    super(same_frame_extended, self).__init__(251)
+    self.addComponent(_Factory.primitive('offset_delta', u2()))
+    self.publish()
+    self.offset_delta=offset
+  def briefString(self):
+    return 'same_frame_extended(offset=%d)' % self.context_offset()
+  def offset(self): return self.offset_delta
+  def set_offset(self, new_offset): 
+    if new_offset < 64:
+      t=self.container()
+      t[t.index(self)] = same_frame(new_offset)
+    else: self.offset_delta = new_offset
+
+class append_frame(stack_map_frame):
+  def __init__(self, num_appends, offset):
+    if num_appends < 1 or num_appends > 3: 
+      raise _OperationDenied("Invalid append amount for append_frame()") 
+    super(append_frame, self).__init__(num_appends + 251)
+    self.addComponent(_Factory.primitive('offset_delta', u2()))
+    self.addComponent(_Factory.generic(
+      'locals', _FixedSizeArray(verification_type_info, num_appends)))
+    self.publish()
+    self.offset_delta=offset
+  def briefString(self):
+    ret = 'append_frame(offset=%d, append=%s' % \
+        ( self.context_offset(), self.locals[0].briefString() )
+    for x in self.locals[1:]:
+      ret += ',' + x.briefString()
+    ret += ')'
+    return ret
+  def offset(self): return self.offset_delta
+  def set_offset(self, new_offset): self.offset_delta = new_offset
+
+class full_frame(stack_map_frame):
+  def __init__(self, offset):
+    super(full_frame, self).__init__(255)
+    self.addComponent(_Factory.primitive('offset_delta', u2()))
+    self.addComponent(_Factory.length('number_of_locals', u2()))
+    self.addComponent(_Factory.structuredArray(
+      'locals', verification_type_info))
+    self.addComponent(_Factory.length('number_of_stack_items', u2()))
+    self.addComponent(_Factory.structuredArray(
+      'stack', verification_type_info))
+    self.publish()
+    self.offset_delta=offset
+  def briefString(self): return 'full_frame(offset=%d, ...)' % \
+      self.context_offset()
+  def offset(self): return self.offset_delta
+  def set_offset(self, new_offset): self.offset_delta = new_offset
+
+
+class bootstrap_method(_Composite):
+  def __init__(self):
+    super(bootstrap_method, self).__init__();
+    self.addComponent(_Factory.cp_index('bootstrap_method_ref'))
+    self.addComponent(_Factory.length('num_bootstrap_arguments', u2()))
+    self.addComponent(_Factory.cpIndexArray('bootstrap_arguments'))
+    self.publish()
+
+class BootstrapMethods_attribute(_AttributeBase):
+  def identifier(): return 'BootstrapMethods'
+  identifier = staticmethod(identifier)
+  def __init__(self, idx):
+    super(BootstrapMethods_attribute, self).__init__(idx)
+    self.addComponent(_AutoSizeComponent('attribute_length', u4(), 2, 4))
+    self.addComponent(_Factory.length('num_bootstrap_methods', u2()))
+    self.addComponent(_Factory.structuredArray(\
+        'bootstrap_methods', bootstrap_method))
+    self.publish()
+
+class bytecode(_Composite):
+  def __init__(self, autoPublish=True, bci=0):
+    super(bytecode, self).__init__()
+    self.addComponent(_Factory.readOnly('opcode', u1(self.op), _HexFormatter()))
+    if autoPublish: self.publish()
+    self._bci = bci
+
+  bytecode_map = None
+  def initBytecodeMap(cls):
+    cls.bytecode_map = [ None for x in range(0x100) ]
+    for x in bytecode.leafClasses(cls):
+      if x != bc_invalid: cls.bytecode_map[x.op] = x
+  initBytecodeMap = classmethod(initBytecodeMap)
+
+  def setBci(self, bci): self._bci = bci
+
+  def leafClasses(clazz):
+    subs = clazz.__subclasses__()
+    if (len(subs) == 0): return [ clazz ]
+    else:
+      leaves = []
+      for x in subs: leaves += bytecode.leafClasses(x)
+      return leaves
+  leafClasses = staticmethod(leafClasses)
+
+  def newInstance(cls, iter, container=None, bci=0):
+    if cls.bytecode_map == None: cls.initBytecodeMap()
+    tag = u1()
+    tag = tag.deserialize(iter)
+    btype = cls.bytecode_map[tag]
+    if btype != None:
+      bc = btype()
+      bc.setContainer(container)
+      return bc.deserialize(iter, bci)
+    bc = bc_invalid(tag)
+    bc.setContainer(container)
+    bc._bci = bci
+    return bc
+  newInstance = classmethod(newInstance)
+
+  def briefString(self, field=None):
+    return ('L%d:' % self._bci).ljust(6) + self.name()
+  def serialize(self, ostream):
+    return reduce(lambda x,y: x+y, \
+              map(lambda w: w.value.serialize(ostream), self.components()), 0)
+  def deserialize(self, iter, bci=0):
+    for x in self.components()[1:]:
+      x.value = x.value.deserialize(iter)
+    return self
+  def size(self, bci=None):
+    return reduce(
+        lambda x,y: x+y, map(lambda z: z.value.size(), self.components()), 0)
+  def _codeSizeAdjusted(self, bci, delta, old_method_size): pass
+  def adjustCodeOffset(self, offset, loc, delta):
+    bci = self._bci
+    if bci > loc and bci + offset <= loc:
+      return offset - delta
+    elif bci < loc and bci + offset > loc: 
+      return offset + delta
+    else: return offset
+
+class bc_invalid(bytecode):
+  op = 0xff
+  def __init__(self, op):
+    self.op = op
+    super(bc_invalid, self).__init__(False)
+  def briefString(self, field=None):
+    if bci != None: return ('L%d:' % self._bci).ljust(6) + \
+        'INVALID(0x%x)' % self.op
+    else: return 'INVALID(0x%x)' % self.op
+
+class _bc_cp2(bytecode):
+  """ A bytecode with a u2 constant pool index """
+  def __init__(self, cp):
+    super(_bc_cp2, self).__init__(False)
+    self.addComponent(_Factory.cp_index('index', cp))
+    self.publish()
+  def briefString(self, field=None):
+    return super(_bc_cp2, self).briefString(field) + ' ' + \
+        self.index.toString()
+
+class _bc_local(bytecode):
+  """ A bytecode with a u1 local variable index """
+  def __init__(self, local):
+    super(_bc_local, self).__init__(False)
+    self.addComponent(_Factory.local('index', u1(local)))
+    self.publish()
+  def briefString(self, field=None):
+    return super(_bc_local, self).briefString(field) + ' ' + \
+        self.index.toString()
+
+class _bc_branch2(bytecode):
+  """ A bytecode with an s2 branch offset """
+  def __init__(self, offset):
+    super(_bc_branch2, self).__init__(False)
+    self.addComponent(_Factory.branch('branch', s2(offset)))
+    self.publish()
+  def briefString(self, field=None):
+    return bytecode.briefString(self, field) + \
+        ' L%d' % (self._bci + self.branch)
+  def _codeSizeAdjusted(self, location_bci, delta, old_method_size): 
+    self.branch = self.adjustCodeOffset(self.branch, location_bci, delta)
+
+class _bc_branch4(bytecode):
+  """ A bytecode with an s4 branch offset """
+  def __init__(self, offset):
+    super(_bc_branch4, self).__init__(False)
+    self.addComponent(_Factory.branch('branch', s4(offset)))
+    self.publish()
+  def briefString(self, field=None):
+    return bytecode.briefString(self, field) + \
+        ' L%d' % (self._bci + self.branch)
+  def _codeSizeAdjusted(self, location_bci, delta, old_method_size): 
+    self.branch = self.adjustCodeOffset(self.branch, location_bci, delta)
+
+class match_offset(_Composite):
+  def __init__(self, match=0, offset=0):
+    super(match_offset, self).__init__()
+    self.addComponent(_Factory.primitive('match', s4(match)))
+    self.addComponent(_Factory.primitive('offset', s4(offset)))
+    self.publish()
+  def briefString(self):
+    return 'pair { %d, %d }' % ( self.match, self.offset )
+
+class aaload(bytecode): op=0x32
+class aastore(bytecode): op=0x53
+class aconst_null(bytecode): op=0x01
+class aload(_bc_local):
+  op=0x19
+  def __init__(self, local=0): super(aload, self).__init__(local)
+class aload_0(bytecode): op=0x2a
+class aload_1(bytecode): op=0x2b
+class aload_2(bytecode): op=0x2c
+class aload_3(bytecode): op=0x2d
+class anewarray(_bc_cp2):
+  op=0xbd
+  def __init__(self, idx=0): super(anewarray, self).__init__(idx)
+class areturn(bytecode): op=0xb0
+class arraylength(bytecode): op=0xbe
+class astore(_bc_local):
+  op=0x3a
+  def __init__(self, local=0): super(astore, self).__init__(local)
+class astore_0(bytecode): op=0x4b
+class astore_1(bytecode): op=0x4c
+class astore_2(bytecode): op=0x4d
+class astore_3(bytecode): op=0x4e
+class athrow(bytecode): op=0xbf
+class baload(bytecode): op=0x33
+class bastore(bytecode): op=0x54
+class bipush(bytecode): 
+  op=0x10
+  def __init__(self, imm=0):
+    super(bipush, self).__init__(False)
+    self.addComponent(_Factory.primitive('byte', s1(imm)))
+    self.publish()
+  def briefString(self, field=None):
+    return super(bipush, self).briefString(field) + ' ' + \
+        self.byte.briefString()
+class caload(bytecode): op=0x34
+class castore(bytecode): op=0x55
+class checkcast(_bc_cp2):
+  op=0xc0
+  def __init__(self, idx=0): super(checkcast, self).__init__(idx)
+class d2f(bytecode): op=0x90
+class d2i(bytecode): op=0x8e
+class d2l(bytecode): op=0x8f
+class dadd(bytecode): op=0x63
+class daload(bytecode): op=0x31
+class dastore(bytecode): op=0x52
+class dcmpg(bytecode): op=0x98
+class dcmpl(bytecode): op=0x97
+class dconst_0(bytecode): op=0x0e
+class dconst_1(bytecode): op=0x0f
+class ddiv(bytecode): op=0x6f
+class dload(_bc_local):
+  op=0x18
+  def __init__(self, local=0): super(dload, self).__init__(local)
+class dload_0(bytecode): op=0x26
+class dload_1(bytecode): op=0x27
+class dload_2(bytecode): op=0x28
+class dload_3(bytecode): op=0x29
+class dmul(bytecode): op=0x6b
+class dneg(bytecode): op=0x77
+class drem(bytecode): op=0x73
+class dreturn(bytecode): op=0xaf
+class dstore(_bc_local):
+  op=0x39
+  def __init__(self, local=0): super(dstore, self).__init__(local)
+class dstore_0(bytecode): op=0x47
+class dstore_1(bytecode): op=0x48
+class dstore_2(bytecode): op=0x49
+class dstore_3(bytecode): op=0x4a
+class dsub(bytecode): op=0x67
+class dup(bytecode): op=0x59
+class dup_x1(bytecode): op=0x5a
+class dup_x2(bytecode): op=0x5b
+class dup2(bytecode): op=0x5c
+class dup2_x1(bytecode): op=0x5d
+class dup2_x2(bytecode): op=0x5e
+class f2d(bytecode): op=0x8d
+class f2i(bytecode): op=0x8b
+class f2l(bytecode): op=0x8c
+class fadd(bytecode): op=0x62
+class faload(bytecode): op=0x30
+class fastore(bytecode): op=0x51
+class fcmpg(bytecode): op=0x96
+class fcmpl(bytecode): op=0x95
+class fconst_0(bytecode): op=0x0b
+class fconst_1(bytecode): op=0x0c
+class fconst_2(bytecode): op=0x0d
+class fdiv(bytecode): op=0x6e
+class fload(_bc_local): 
+  op=0x17
+  def __init__(self, local=0): super(fload, self).__init__(local)
+class fload_0(bytecode): op=0x22
+class fload_1(bytecode): op=0x23
+class fload_2(bytecode): op=0x24
+class fload_3(bytecode): op=0x25
+class fmul(bytecode): op=0x6a
+class fneg(bytecode): op=0x76
+class frem(bytecode): op=0x72
+class freturn(bytecode): op=0xae
+class fstore(_bc_local):
+  op=0x38
+  def __init__(self, local=0): super(fstore, self).__init__(local)
+class fstore_0(bytecode): op=0x43
+class fstore_1(bytecode): op=0x44
+class fstore_2(bytecode): op=0x45
+class fstore_3(bytecode): op=0x46
+class fsub(bytecode): op=0x66
+class getfield(_bc_cp2):
+  op=0xb4
+  def __init__(self, idx=0): super(getfield, self).__init__(idx)
+class getstatic(_bc_cp2):
+  op=0xb2
+  def __init__(self, idx=0): super(getstatic, self).__init__(idx)
+class goto(_bc_branch2):
+  op=0xa7
+  def __init__(self, bo=0): super(goto, self).__init__(bo)
+class goto_w(_bc_branch4):
+  op=0xc8
+  def __init__(self, offset=0): super(goto_w, self).__init__(offset)
+class i2b(bytecode): op=0x91
+class i2c(bytecode): op=0x92
+class i2d(bytecode): op=0x87
+class i2f(bytecode): op=0x86
+class i2l(bytecode): op=0x85
+class i2s(bytecode): op=0x93
+class iadd(bytecode): op=0x60
+class iaload(bytecode): op=0x2e
+class iand(bytecode): op=0x7e
+class iastore(bytecode): op=0x4f
+class iconst_m1(bytecode): op=0x02
+class iconst_0(bytecode): op=0x03
+class iconst_1(bytecode): op=0x04
+class iconst_2(bytecode): op=0x05
+class iconst_3(bytecode): op=0x06
+class iconst_4(bytecode): op=0x07
+class iconst_5(bytecode): op=0x08
+class idiv(bytecode): op=0x6c
+class if_acmpeq(_bc_branch2):
+  op=0xa5
+  def __init__(self, bo=0): super(if_acmpeq, self).__init__(bo)
+class if_acmpne(_bc_branch2):
+  op=0xa6
+  def __init__(self, bo=0): super(if_acmpne, self).__init__(bo)
+class if_icmpeq(_bc_branch2):
+  op=0x9f
+  def __init__(self, bo=0): super(if_icmpeq, self).__init__(bo)
+class if_icmpne(_bc_branch2):
+  op=0xa0
+  def __init__(self, bo=0): super(if_icmpne, self).__init__(bo)
+class if_icmplt(_bc_branch2):
+  op=0xa1
+  def __init__(self, bo=0): super(if_icmplt, self).__init__(bo)
+class if_icmple(_bc_branch2):
+  op=0xa2
+  def __init__(self, bo=0): super(if_icmple, self).__init__(bo)
+class if_icmpgt(_bc_branch2):
+  op=0xa3
+  def __init__(self, bo=0): super(if_icmpgt, self).__init__(bo)
+class if_icmpge(_bc_branch2):
+  op=0xa4
+  def __init__(self, bo=0): super(if_icmpge, self).__init__(bo)
+class ifeq(_bc_branch2):
+  op=0x99
+  def __init__(self, bo=0): super(ifeq, self).__init__(bo)
+class ifne(_bc_branch2):
+  op=0x9a
+  def __init__(self, bo=0): super(ifne, self).__init__(bo)
+class iflt(_bc_branch2):
+  op=0x9b
+  def __init__(self, bo=0): super(iflt, self).__init__(bo)
+class ifle(_bc_branch2):
+  op=0x9c
+  def __init__(self, bo=0): super(ifle, self).__init__(bo)
+class ifgt(_bc_branch2):
+  op=0x9d
+  def __init__(self, bo=0): super(ifgt, self).__init__(bo)
+class ifge(_bc_branch2):
+  op=0x9e
+  def __init__(self, bo=0): super(ifge, self).__init__(bo)
+class ifnonnull(_bc_branch2):
+  op=0xc7
+  def __init__(self, bo=0): super(ifnonnull, self).__init__(bo)
+class ifnull(_bc_branch2):
+  op=0xc6
+  def __init__(self, bo=0): super(ifnull, self).__init__(bo)
+class iinc(bytecode):
+  op=0x84
+  def __init__(self, local=0, imm=0):
+    super(iinc, self).__init__(False)
+    self.addComponent(_Factory.local('index', u1(local)))
+    self.addComponent(_Factory.primitive('const', s1(imm)))
+    self.publish()
+  def briefString(self, field=None):
+    return super(iinc, self).briefString(field) + \
+        " %d %d" % ( self.index, self.const )
+class iload(_bc_local): 
+  op=0x15
+  def __init__(self, local=0): super(iload, self).__init__(local)
+class iload_0(bytecode): op=0x1a
+class iload_1(bytecode): op=0x1b
+class iload_2(bytecode): op=0x1c
+class iload_3(bytecode): op=0x1d
+class imul(bytecode): op=0x68
+class ineg(bytecode): op=0x74
+class instanceof(_bc_cp2):
+  op=0xc1
+  def __init__(self, idx=0): super(instanceof, self).__init__(idx)
+class invokeinterface(bytecode):
+  op=0xb9
+  def __init__(self, cp_idx=0, count=0):
+    super(invokeinterface, self).__init__(False)
+    self.addComponent(_Factory.cp_index('index', cp_idx))
+    self.addComponent(_Factory.primitive('count', u1(count)))
+    self.addComponent(_Factory.readOnly('pad', u1(0)))
+    self.publish()
+  def briefString(self, field=None):
+    return super(invokeinterface, self).briefString(field) + \
+        ' count=%d ' % self.count + self.index.toString()
+class invokespecial(_bc_cp2):
+  op=0xb7
+  def __init__(self, idx=0): super(invokespecial, self).__init__(idx)
+class invokestatic(_bc_cp2):
+  op=0xb8
+  def __init__(self, idx=0): super(invokestatic, self).__init__(idx)
+class invokevirtual(_bc_cp2):
+  op=0xb6
+  def __init__(self, idx=0): super(invokevirtual, self).__init__(idx)
+class invokedynamic(bytecode):
+  op=0xba
+  def __init__(self, idx=0): 
+    super(invokedynamic, self).__init__(False)
+    self.addComponent(_Factory.cp_index('index', idx))
+    self.addComponent(_Factory.readOnly('pad', u2(0)))
+    self.publish()
+  def briefString(self, field=None):
+    return super(invokedynamic, self).briefString(field) + ' ' + \
+        self.index.toString()
+class ior(bytecode): op=0x80
+class irem(bytecode): op=0x70
+class ireturn(bytecode): op=0xac
+class ishl(bytecode): op=0x78
+class ishr(bytecode): op=0x7a
+class istore(_bc_local):
+  op=0x36
+  def __init__(self, local=0): super(istore, self).__init__(local)
+class istore_0(bytecode): op=0x3b
+class istore_1(bytecode): op=0x3c
+class istore_2(bytecode): op=0x3d
+class istore_3(bytecode): op=0x3e
+class isub(bytecode): op=0x64
+class iushr(bytecode): op=0x7c
+class ixor(bytecode): op=0x82
+class jsr(_bc_branch2):
+  op=0xa8
+  def __init__(self, bo=0): super(jsr, self).__init__(bo)
+class jsr_w(_bc_branch4):
+  op=0xc9
+  def __init__(self, offset=0): super(jsr_w, self).__init__(offset)
+class l2d(bytecode): op=0x8a
+class l2f(bytecode): op=0x89
+class l2i(bytecode): op=0x88
+class ladd(bytecode): op=0x61
+class laload(bytecode): op=0x2f
+class land(bytecode): op=0x7f
+class lastore(bytecode): op=0x50
+class lcmp(bytecode): op=0x94
+class lconst_0(bytecode): op=0x09
+class lconst_1(bytecode): op=0x0a
+class ldc(bytecode):
+  op=0x12
+  def __init__(self, idx=0):
+    super(ldc, self).__init__(False)
+    self.addComponent(_Component(
+        'index', _CpIndex_1(idx), None, [ _PrimConverter(_CpIndex_1) ]))
+    self.publish()
+  def briefString(self, field=None):
+    return super(ldc, self).briefString(field) + ' ' + self.index.briefString()
+class ldc_w(_bc_cp2):
+  op=0x13
+  def __init__(self, idx=0): super(ldc_w, self).__init__(idx)
+class ldc2_w(_bc_cp2):
+  op=0x14
+  def __init__(self, idx=0): super(ldc2_w, self).__init__(idx)
+class ldiv(bytecode): op=0x6d
+class lload(_bc_local): 
+  op=0x16
+  def __init__(self, local=0): super(lload, self).__init__(local)
+class lload_0(bytecode): op=0x1e
+class lload_1(bytecode): op=0x1f
+class lload_2(bytecode): op=0x20
+class lload_3(bytecode): op=0x21
+class lmul(bytecode): op=0x69
+class lneg(bytecode): op=0x75
+class lookupswitch(bytecode):
+  op=0xab
+  def __init__(self, default=0):
+    super(lookupswitch, self).__init__(False)
+    self.addComponent(_Factory.primitive('default', s4(default)))
+    self.addComponent(_Factory.length('npairs', u4()))
+    self.addComponent(_Factory.structuredArray('pairs', match_offset))
+    self.publish()
+  def briefString(self, field=None):
+    return super(lookupswitch, self).briefString(field) + \
+        ' default=%d ' % self.default + self.pairs.briefString()
+  def serialize(self, ostream):
+    bytecount = self.component(0).value.serialize(ostream)
+    pad = 3 - (self._bci & 0x3)
+    for x in range(pad):
+      bytecount += u1(0).serialize(ostream)
+    for x in self.components()[1:]: 
+      bytecount += x.value.serialize(ostream)
+    return bytecount
+  def deserialize(self, iter, bci=0):
+    pad = 3 - (bci & 0x3)
+    for x in range(pad):
+      u1().deserialize(iter)
+    for x in self.components()[1:]: x.value = x.value.deserialize(iter)
+    return self
+  def size(self, bci=None):
+    if bci is None: bci = self._bci
+    size = 1 # opcode
+    size += 3 - (bci & 0x3) # pad
+    for x in self.components()[1:]: size += x.value.size()
+    return size
+  def _codeSizeAdjusted(self, location_bci, delta, old_method_size): 
+    self.default = self.adjustCodeOffset(self.default, location_bci, delta)
+    for pair in self.pairs:
+      pair.offset = self.adjustCodeOffset(pair.offset, location_bci, delta)
+
+class lor(bytecode): op=0x81
+class lrem(bytecode): op=0x71
+class lreturn(bytecode): op=0xad
+class lshl(bytecode): op=0x79
+class lshr(bytecode): op=0x7b
+class lstore(_bc_local):
+  op=0x37
+  def __init__(self, local=0): super(lstore, self).__init__(local)
+class lstore_0(bytecode): op=0x3f
+class lstore_1(bytecode): op=0x40
+class lstore_2(bytecode): op=0x41
+class lstore_3(bytecode): op=0x42
+class lsub(bytecode): op=0x65
+class lushr(bytecode): op=0x7d
+class lxor(bytecode): op=0x83
+class montorenter(bytecode): op=0xc2
+class montorexit(bytecode): op=0xc3
+class multianewarray(bytecode):
+  op=0xc5
+  def __init__(self, cp=0, dimensions=0):
+    super(multianewarray, self).__init__(False)
+    self.addComponent(_Factory.cp_index('index', cp))
+    self.addComponent(_Factory.primitive('dimensions', u1(dimensions)))
+    self.publish()
+  def briefString(self, field=None):
+    return super(multianewarray, self).briefString(field) + \
+        ' dims=%d' % self.dimensions + ' ' + self.index.briefString()
+class new(_bc_cp2):
+  op=0xbb
+  def __init__(self, idx=0): super(new, self).__init__(idx)
+class newarray(bytecode):
+  op=0xbc
+  def __init__(self, atype=0):
+    super(newarray, self).__init__(False)
+    self.addComponent(_Component('atype', _ArrayType(atype), None,
+        [ _PrimConverter(_ArrayType) ]))
+    self.publish()
+  def briefString(self, field=None):
+    return super(newarray, self).briefString(field) + ' ' + \
+        self.atype.toString()
+class nop(bytecode): op=0x00
+class pop(bytecode): op=0x57
+class pop2(bytecode): op=0x58
+class putfield(_bc_cp2):
+  op=0xb5
+  def __init__(self, idx=0): super(putfield, self).__init__(idx)
+class putstatic(_bc_cp2):
+  op=0xb3
+  def __init__(self, idx=0): super(putstatic, self).__init__(idx)
+class ret(_bc_local):
+  op=0xa9
+  def __init__(self, local=0): super(ret, self).__init__(local)
+class _return(bytecode): op=0xb1
+class saload(bytecode): op=0x35
+class sastore(bytecode): op=0x56
+class sipush(bytecode): 
+  op=0x11
+  def __init__(self, imm=0):
+    super(sipush, self).__init__(False)
+    self.addComponent(_Factory.primitive('byte', s2(imm)))
+    self.publish()
+  def briefString(self, field=None):
+    return super(sipush, self).briefString(field) + ' ' + \
+        self.byte.briefString()
+class swap(bytecode): op=0x5f
+class tableswitch(bytecode):
+  op=0xaa
+  def __init__(self, default=0, hi=0, low=0, offsets=None):
+    super(tableswitch, self).__init__(False)
+    self.addComponent(_Factory.primitive('default', s4(default)))
+    self.addComponent(_Factory.primitive('low', s4(default)))
+    self.addComponent(_Factory.primitive('high', s4(default)))
+    self.addComponent(_Factory.generic('offsets', _TableSwitchOffsets()))
+    self.publish()
+    if offsets != None: self.offsets += [ s4(x) for x in offsets ]
+  def briefString(self, field=None):
+    return super(tableswitch, self).briefString(field) + \
+      ' default=%d low=%d high=%d' % ( self.default, self.low, self.high ) + \
+      ' ' + self.offsets.briefString()
+  def serialize(self, ostream):
+    bytecount = self.component(0).value.serialize(ostream)
+    pad = 3 - (self._bci & 0x3)
+    for x in range(pad):
+      bytecount += u1(0).serialize(ostream)
+    for x in self.components()[1:]: 
+      bytecount += x.value.serialize(ostream)
+    return bytecount
+  def deserialize(self, iter, bci=0):
+    pad = 3 - (bci & 0x3)
+    for x in range(pad):
+      u1().deserialize(iter)
+    for x in self.components()[1:]: x.value = x.value.deserialize(iter)
+    return self
+  def size(self, bci=None):
+    if bci is None: bci = self._bci
+    size = 1 # opcode
+    size += 3 - (bci & 0x3) # pad
+    for x in self.components()[1:]: size += x.value.size()
+    return size
+  def _codeSizeAdjusted(self, location_bci, delta, old_method_size): 
+    self.default = self.adjustCodeOffset(self.default, location_bci, delta)
+    for i in range(len(self.offsets)):
+      self.offsets[i] = self.adjustCodeOffset(
+          self.offsets[i], location_bci, delta)
+
+class wide(bytecode):
+  op=0xc4
+  def __init__(self, op=0, local=0, imm=0):
+    super(wide, self).__init__(False)
+    self.addComponent(_Factory.primitive('modified_opcode', u1(op)))
+    self.addComponent(_Factory.local('index', u2(local)))
+    self.addComponent(_Factory.primitive('const', s2(imm)))
+    self.publish()
+  def getIterationList(self, list):
+    super(_Composite, self).getIterationList(list)
+    if self.modified_opcode == iinc.op:
+      for x in self.components():
+        x.value.getIterationList(list)
+    else:
+      for x in self.components()[:-1]:
+        x.value.getIterationList(list)
+  def serialize(self, ostream):
+    bytecount = 0
+    if self.modified_opcode == iinc.op:
+      for x in self.components(): 
+        bytecount += x.value.serialize(ostream)
+    else:
+      for x in self.components()[:-1]: 
+        bytecont += x.value.serialize(ostream)
+    return bytecount
+  def deserialize(self, iter, bci=0):
+    for x in range(1,3):
+      self.component(x).value = self.component(x).value.deserialize(iter)
+    if self.modified_opcode == iinc.op:
+      self.component(3).value = self.component(3).value.deserialize(iter)
+    return self
+  def size(self, bci=None):
+    size = 1
+    if self.modified_opcode == iinc.op:
+      for x in self.components()[1:]: size += x.value.size()
+    else:
+      for x in self.components()[1:-1]: size += x.value.size()
+    return size
+  def toString(self, level=0, field=None):
+    if self.modified_opcode == iinc.op:
+      return super(wide, self).toString(level, field)
+    else:
+      indent = Settings.indent * level
+      field_name = ''
+      if field != None: field_name = field.name
+      ret = indent + self.name() + ' %s {\n' % field_name
+      for x in self.components()[:-1]:
+        if level + 1 > Settings.extraDetailLevels:
+          ret += indent + Settings.indent + x.get().briefString(x) + '\n'
+        else: ret += x.get().toString(level + 1, x) + '\n'
+      ret += indent + '}'
+      return ret
+  def briefString(self, field=None):
+    s = super(wide, self).briefString(field) + ' '
+    op = self.modified_opcode
+    if (op == iinc.op): s += 'iinc %d %d' % (self.index, self.const)
+    elif (op == iload.op): s += 'iload %d' % self.index
+    elif (op == fload.op): s += 'fload %d' % self.index
+    elif (op == aload.op): s += 'aload %d' % self.index
+    elif (op == lload.op): s += 'lload %d' % self.index
+    elif (op == dload.op): s += 'dload %d' % self.index
+    elif (op == istore.op): s += 'istore %d' % self.index
+    elif (op == fstore.op): s += 'fstore %d' % self.index
+    elif (op == astore.op): s += 'astore %d' % self.index
+    elif (op == lstore.op): s += 'lstore %d' % self.index
+    elif (op == dstore.op): s += 'dstore %d' % self.index
+    elif (op == ret.op): s += 'ret %d' % self.index
+    return s
+
+if __name__ == '__main__':
+  loaded = _List()
+  _Main().run()
+
+__EOF__
+fi
+/usr/bin/env PYTHONSTARTUP=${python_src} python -i - "$@"
+
+

@@ -1,0 +1,645 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html>
+<head>
+  <title>Jallie User Manual</title>
+</head>
+  <body>
+  <TABLE style="padding:20px; margin:30px; vertical-align:middle; border:2px inset #111111;" background="jallie_background.jpg"><TR><TD>
+    <center><img src="jallie.jpg" width=294 height=138 /></center>
+    <hr/>
+      <a ref="TOC"/>
+      <h1>Jallie User Manual</h1>
+      <ul>
+        <li><a href="#introduction">Introduction</a></li>
+        <li><a href="#getting_started">Getting Started</a></li>
+        <li><a href="#disassembler">Disassembling Class Files</a></li>
+        <li><a href="#explore">Exploring Class Files</a></li>
+        <li><a href="#changing">Modifying Class Files</a></li>
+        <li><a href="#saving">Saving Classes</a></li>
+        <li><a href="#settings">Settings</a></li>
+        <li><a href="#scripting">Scripting</a></li>
+      </ul>
+    <hr/>
+    <a name="introduction"/>
+    <h2>Introduction</h2>
+    <p>
+      JALLIE is a tool that can be used to disassemble, explore, update, and 
+      write to the Java class file format.  It has a few batch-mode options 
+      for disassembling or running scripts over class files, but its most 
+      powerful usage is running in interactive mode with the class file loaded
+      into memory.  In this mode, you have a python command prompt and full 
+      access to all of python, and the class is parsed and loaded into 
+      specialized data structures that make exploring, dumping, or changing 
+      the classfile data safe and easy.  In this mode you're really running 
+      a glorified binary editor which can take care of much of the class file
+      bookkeeping for you. 
+    </p>
+    <p>
+      As this program deals with Java classfiles at a rather low level, it is 
+      useful to refer to the Java Virtual Machine Specification when 
+      familiarizing yourself with the program.  Especially useful is 
+      <a href="http://java.sun.com/docs/books/jvms/second_edition/html/ClassFile.doc.html">Chapter 4</a>, which defines the data formats and layout of the 
+      data structures in a classfile.  Each structure defined in this chapter
+      is present in <tt>jallie</tt>, with the same name.  When browsing though
+      a classfile with <tt>jallie</tt>, the intent is that you'll see the 
+      same exact structures with the attached data for the instance of the 
+      classfile you're looking at.
+    </p>
+    <p>
+      This manual will demonstrate concepts using examples.  The olive-colored 
+      boxes will show the exact commands types and the response that 
+      <tt>jallie</tt> provides.  If you're familiar with python, you may well
+      notice that the command interface is simply a python script interpreter
+      and you may perform any python commands you wish.  If you're not familiar
+      with python, don't worry -- just about everything you will want to do 
+      uses a very limited and easy-to-use and straightforward subset of python 
+      syntax.  You can easily use this program without knowing any python by
+      following the examples in this document.
+    </p>
+    <p>
+      Just about all of the examples assume a simple "Hello world" classfile 
+      in the current directory.  Here's the Java source:
+    </p>
+    <table bgcolor="#c0e0a0" width="80%"><tr><td><pre>
+public class Hello {
+    public static void main(String argv[]) {
+        System.out.println("Hello, world!");
+    }
+}
+    </pre></tr></td></table>
+    <p>
+      Just compile it, and then you can follow along:
+    </p>
+    <table bgcolor="#c0e0a0" width="80%"><tr><td><pre>
+user@home> javac Hello.java
+    </pre></tr></td></table>
+    </p>
+    <hr/>
+    <a name="getting_started"/>
+    <h2>Getting Started</h2>
+    <p>
+      As of now, there's no fancy installation or unpacking needed for using 
+      the program.  You can simply download the <a href="https://sourceforge.net/projects/jallie/files/latest/download">
+      <tt>latest tar/zip</tt></a> file, unzip
+      it with your favorite unzip program, change the file permissions to 
+      <tt>execute</tt>, and then you can run it.  It does require the 
+      <tt>python</tt> program to be installed and available on your path.
+    </p>
+    <p>
+      Here's how it's done on just about any unix-based platform 
+      (or cygwin, on windows):
+    </p>
+    <table bgcolor="#c0e0a0" width="80%"><tr><td><pre>
+user@home> gunzip -dc jallie-XXX.tar.gz | tar xf -
+user@home> chmod +x jallie
+user@home> ./jallie Hello.class
+... 
+    </pre></tr></td></table>
+    <hr/>
+    <a name="disassembler">
+    <h2>Disassembling Class Files</h2>
+    <p>
+      The most straightforward way to view your class files is to simply 
+      disassemble them.  You can do this in <tt>jallie</tt> in batch mode in 
+      which case it will disassemble all files listed on the command-line 
+      and print them out in excruciating detail (right down to the fields 
+      of the bytecodes).  Files can be listed as relative or absolute paths, 
+      or you can provide the dotted-package name format (like you would for 
+      <tt>java</tt> or <tt>javah</tt>).  When disassembly has completed the 
+      program will exit.
+    </p>
+    <table bgcolor="#c0e0a0" width="80%"><tr><td><pre>
+user@home> ./jallie --dis Hello.class 2>/dev/null
+ClassFile  {
+  u4 magic = 0xcafebabe
+  u2 minor_version = 0
+  u2 major_version = 50
+  u2 constant_pool_count = 29
+  cp_info constant_pool[29] {
+    [ 0 ] [Unused]
+    [ 1 ] CONSTANT_Methodref_info  {
+      u1 tag = 10
+      u2 class_index = #6 // "java/lang/Object"
+      u2 name_and_type_index = #15 // &lt;init&gt; ()V
+    }
+    [ 2 ] CONSTANT_Fieldref_info  {
+      u1 tag = 9
+      u2 class_index = #16 // "java/lang/System"
+      u2 name_and_type_index = #17 // out Ljava/io/PrintStream;
+    }                                                                           
+</pre><i>[...]</i><pre>
+user@home>
+    </pre></tr></td></table>
+    <p>
+      The full output was clipped for brievity, but is available 
+      <a href="full_dis.html">here</a> if you want to browse through to get 
+      an idea of what is displayed.  The <tt>2&gt;/dev/null</tt> part of the 
+      command is just to hide the python clutter that gets sent to stderr.
+    </p>
+    <p>
+      Things to notice here:
+      <ul>
+        <li>Each structure is displayed using its name (<tt>ClassFile</tt>, 
+          <tt>CONSTANT_Methodref_info</tt>), and a list of its fields 
+          with the field values displayed inline.  Primitive fields 
+          (<tt>u4</tt>, <tt>u2</tt>) have their values displayed directly.
+          When there's additional meaning associated with a primitive field
+          value, the value is formatted, annotated, or sometimes replaced 
+          by the meaning rather than just the raw byte values.
+        </li>
+        <li>Array values are displayed in typical array notation: the base 
+        type of the array, the name of the field, and then brackets which 
+        contain the number of elements.  Each element in the array is
+        prefixed with its index in brackets, followed by the contents of
+        the element.
+        </li>
+        <li>In some places in the classfile, an array can only hold one 
+        type of data.  In most other places, though, the array is defined with
+        a base type, but actual contains instances of subclasses of that 
+        base type.  The base type is used in the field specification of the
+        array, but the actual subclasses are used as elements when appropriate.
+        </li>
+        <li>The hash (<tt>#</tt>) notation is used to indicate constant pool
+        index values.
+        </li>
+      </ul>
+    </p>
+    <hr/>
+    <a name="explore"/>
+    <h2>Exploring Class Files</h2>
+    <p>
+      The common use of the program is to explore class file interactively
+      by starting with an overview and drilling down to the points of interest.
+      This is the default mode of the application.  You can either preload 
+      a number of classes by providing the class file locations (or class 
+      names), or you can load files from inside the environment.  Classes 
+      that are automatically loaded will be assigned to a python variable 
+      which matches the class name.  A variable <tt>loaded</tt> also exists
+      which is a list that contains all the auto-loaded classfiles.  
+      Classfiles which are loaded interactively are not assigned variables 
+      nor do they get added to the <tt>loaded</tt> variable (but you can do
+      these things if you want to).
+    </p>
+    <p>
+      Automatically-loaded classes which are in the default package will 
+      be assigned to simple name variables which match the class name.  
+      Classes which are in packages will be accessible through their full
+      dotted-package name. 
+    </p>
+    <table bgcolor="#c0e0a0" width="80%"><tr><td><pre>
+user@home> ./jallie Hello.class com/foo/Main.class
+Loaded class: "Hello"
+Loaded class: "com/foo/Main"
+>>> print loaded
+[ ClassFile(Hello), ClassFile(com/foo/Main) ]
+>>> print com.foo.Main
+ClassFile  {
+  u4 magic = 0xcafebabe
+  u2 minor_version = 0
+  u2 major_version = 50
+  u2 constant_pool_count = 29
+  cp_info constant_pool[29] = { ... }
+  u2 access_flags = ( ACC_PUBLIC, ACC_SUPER )
+  u2 this_class = #5 // "com/foo/Main"
+  u2 super_class = #6 // "java/lang/Object"
+  u2 interfaces_count = 0
+  u2 interfaces[0] = { ... }
+  u2 fields_count = 0
+  field_info fields[0] = { ... }
+  u2 methods_count = 2
+  method_info methods[2] = { ... }
+  u2 attributes_count = 1
+  attribute_info attributes[1] = { ... }
+}
+    </pre></tr></td></table>
+    <p>
+      Classes can also be loaded from a specific file on-the-fly, or 
+      empty classes can be created:
+    </p>
+    <table bgcolor="#c0e0a0" width="80%"><tr><td><pre>
+>>> cf = ClassFile('Goodbye.class')
+>>> print cf.access_flags
+33
+>>> empty = ClassFile()
+>>> print empty
+ClassFile  {
+  u4 magic = 0xcafebabe
+  u2 minor_version = 0
+  u2 major_version = 0
+  u2 constant_pool_count = 1
+  cp_info constant_pool[1] = { ... }
+  u2 access_flags = (  )
+  u2 this_class = #0 // NULL
+  u2 super_class = #0 // NULL
+  u2 interfaces_count = 0
+  u2 interfaces[0] = { ... }
+  u2 fields_count = 0
+  field_info fields[0] = { ... }
+  u2 methods_count = 0
+  method_info methods[0] = { ... }
+  u2 attributes_count = 0
+  attribute_info attributes[0] = { ... }
+}
+>>>
+
+    </pre></tr></td></table>
+    <p>
+      By default, printing any structure or array will display fields 
+      and primitive values, but will not recursively print substructures
+      (see <a href="#settings">Settings</a> for details on how to change this).
+      Many primitive values are translated or annotated to help display 
+      their meaning.  However, they are still primitives which can be displayed
+      on their own and even mixed into expressions.      
+    </p>
+    <table bgcolor="#c0e0a0" width="80%"><tr><td><pre>
+>>> print Hello.major_version
+50
+>>> print Hello.access_flags
+33
+>>> print Hello.magic
+3405691582
+>>> print Hello.minor_version + 4
+4
+>>>
+    </pre></tr></td></table>
+    <p>
+      The values displayed as <tt>{ ... }</tt> indicate the field contains
+      more data but that data is ommitted from the current display.  One can
+      print the specific field to see the details for that field.  In many 
+      cases, a summary can be printed instead of the elipsis.  Even when a
+      summary is displayed, printing the field individually will display the 
+      more detailed breakdown of data for that field.  Array elements can 
+      be accessed using the typical array syntax.  Python actually provides 
+      array slicing capabilities, and those can be used as well to display only
+      part of an array.
+    </p>
+    <p>
+      Drilling down for details:
+    </p>
+    <table bgcolor="#c0e0a0" width="80%"><tr><td><pre>
+>>> print Hello
+ClassFile  {
+  u4 magic = 0xcafebabe
+  u2 minor_version = 0
+  u2 major_version = 50
+  u2 constant_pool_count = 29
+  cp_info constant_pool[29] = { ... }
+  u2 access_flags = ( ACC_PUBLIC, ACC_SUPER )
+  u2 this_class = #5 // "Hello"
+  u2 super_class = #6 // "java/lang/Object"
+  u2 interfaces_count = 0
+  u2 interfaces[0] = { ... }
+  u2 fields_count = 0
+  field_info fields[0] = { ... }
+  u2 methods_count = 2
+  method_info methods[2] = { ... }
+  u2 attributes_count = 1
+  attribute_info attributes[1] = { ... }
+}
+>>> print Hello.methods
+method_info[2] {
+  [ 0 ] method_info( "&lt;init&gt;", "()V" )
+  [ 1 ] method_info( "main", "([Ljava/lang/String;)V" )
+}
+>>> print Hello.methods[1]
+method_info  {
+  u2 access_flags = ( ACC_PUBLIC, ACC_STATIC )
+  u2 name_index = #11 // "main"
+  u2 descriptor_index = #12 // "([Ljava/lang/String;)V"
+  u2 attributes_count = 1
+  attribute_info attributes[1] = { ... }
+}
+>>> print Hello.methods[1].attributes
+attribute_info[1] {
+  [ 0 ] Code_attribute: { ... }
+}
+>>> print Hello.methods[1].attributes[0]
+Code_attribute  {
+  u2 attribute_name_index = #9 // "Code"
+  u4 attribute_length = 37
+  u2 max_stack = 2
+  u2 max_locals = 1
+  u4 code_length = 9
+  bytecode code[4] = { ... }
+  u2 exception_table_length = 0
+  exception_table_entry exception_table[0] = { ... }
+  u2 attributes_count = 1
+  attribute_info attributes[1] = { ... }
+}
+>>> print Hello.methods[1].attributes[0].code
+bytecode[4] {
+  [  0 ] L0:   getstatic #2 // java/lang/System.out Ljava/io/PrintStream;
+  [  1 ] L3:   ldc #3 // "Hello, world!"
+  [  2 ] L5:   invokevirtual #4 // java/io/PrintStream.println (Ljava/lang/String;)V
+  [  3 ] L8:   vreturn
+}
+>>>
+    </pre></tr></td></table>
+    <p>
+      Any internal structure is addressible and can be assigned to a local
+      variable for later referencing.  This can save some typing when 
+      exploring deep in the data structure.  All assignments are reference 
+      assignments, not copies.  This is not important now, but is something
+      to keep in mind if you start changing fields.  (Local variables need
+      no declaration -- their assignment creates them).
+    </p>
+    <table bgcolor="#c0e0a0" width="80%"><tr><td><pre>
+>>> code = Hello.methods[1].attributes[0].code
+>>> print code
+bytecode[4] {
+  [  0 ] L0:   getstatic #2 // java/lang/System.out Ljava/io/PrintStream;
+  [  1 ] L3:   ldc #3 // "Hello, world!"
+  [  2 ] L5:   invokevirtual #4 // java/io/PrintStream.println (Ljava/lang/String;)V
+  [  3 ] L8:   vreturn
+}
+>>> print code[2]
+invokevirtual  {
+  u1 opcode = 0xb6
+  u2 index = #4 // java/io/PrintStream.println (Ljava/lang/String;)V
+}
+    </pre></tr></td></table>
+    <p>
+      There are a number of things one can do with any substructure reference
+      in the classfile.  The <tt>classfile()</tt> method returns a reference
+      to the classfile which the reference is a part of.  The <tt>size()</tt>
+      method can be used to find the on-disk size in bytes of the reference 
+      and everything it contains.  And the <tt>hex()</tt> method shows the 
+      actual bytes in hex (in a format understood by the program <tt>xxd</tt>)
+    </p> 
+    <table bgcolor="#c0e0a0" width="80%"><tr><td><pre>
+>>> print Hello.major_version.size()
+2
+>>> Hello.major_version.hex()
+0000000: 0032
+>>> print Hello.methods[1].size()
+51
+>>> Hello.methods[1].hex()
+0000000: 0009 000b 000c 0001 0009 0000 0025 0002
+0000010: 0001 0000 0009 b200 0212 03b6 0004 b100
+0000020: 0000 0100 0a00 0000 0a00 0200 0000 0300
+0000030: 0800 04
+>>> Hello.methods[1].attributes[0].hex()
+0000000: 0009 0000 0025 0002 0001 0000 0009 b200
+0000010: 0212 03b6 0004 b100 0000 0100 0a00 0000
+0000020: 0a00 0200 0000 0300 0800 04
+>>>
+    </pre></tr></td></table>
+    <p>
+      Of course, calling <tt>hex()</tt> upon the classfile will get you the
+      entire binary file.
+    </p>
+    <table bgcolor="#c0e0a0" width="80%"><tr><td><pre>
+>>> Hello.hex()
+0000000: cafe babe 0000 0032 001d 0a00 0600 0f09
+0000010: 0010 0011 0800 120a 0013 0014 0700 1507
+0000020: 0016 0100 063c 696e 6974 3e01 0003 2829
+0000030: 5601 0004 436f 6465 0100 0f4c 696e 654e
+0000040: 756d 6265 7254 6162 6c65 0100 046d 6169
+0000050: 6e01 0016 285b 4c6a 6176 612f 6c61 6e67
+0000060: 2f53 7472 696e 673b 2956 0100 0a53 6f75
+0000070: 7263 6546 696c 6501 000a 4865 6c6c 6f2e
+0000080: 6a61 7661 0c00 0700 0807 0017 0c00 1800
+0000090: 1901 000d 4865 6c6c 6f2c 2077 6f72 6c64
+00000a0: 2107 001a 0c00 1b00 1c01 0005 4865 6c6c
+00000b0: 6f01 0010 6a61 7661 2f6c 616e 672f 4f62
+00000c0: 6a65 6374 0100 106a 6176 612f 6c61 6e67
+00000d0: 2f53 7973 7465 6d01 0003 6f75 7401 0015
+00000e0: 4c6a 6176 612f 696f 2f50 7269 6e74 5374
+00000f0: 7265 616d 3b01 0013 6a61 7661 2f69 6f2f
+0000100: 5072 696e 7453 7472 6561 6d01 0007 7072
+0000110: 696e 746c 6e01 0015 284c 6a61 7661 2f6c
+0000120: 616e 672f 5374 7269 6e67 3b29 5600 2100
+0000130: 0500 0600 0000 0000 0200 0100 0700 0800
+0000140: 0100 0900 0000 1d00 0100 0100 0000 052a
+0000150: b700 01b1 0000 0001 000a 0000 0006 0001
+0000160: 0000 0001 0009 000b 000c 0001 0009 0000
+0000170: 0025 0002 0001 0000 0009 b200 0212 03b6
+0000180: 0004 b100 0000 0100 0a00 0000 0a00 0200
+0000190: 0000 0300 0800 0400 0100 0d00 0000 0200
+00001a0: 0e
+>>>
+    </pre></tr></td></table>
+    <p>
+      Every reference also has a <tt>path()</tt> method which details the 
+      path from the classfile to the reference.
+    </p>
+    <table bgcolor="#c0e0a0" width="80%"><tr><td><pre>
+>>> print Hello.constant_pool[16].name_index.path()
+Hello.constant_pool[16].name_index
+>>> print code.path()
+Hello.methods[1].attributes[0].code
+    </pre></tr></td></table>
+    <hr/>
+    <a name="changing"/>
+    <h2>Modifying the Class Files</h2>
+    <p>
+      Changing a primitive values is usually as simple as typing in the 
+      assignment statement.  
+    </p>
+    <table bgcolor="#c0e0a0" width="80%"><tr><td><pre>
+>>> print Hello.major_version
+50
+>>> Hello.major_version = 49
+>>> Hello.minor_version = 3
+>>> print Hello
+ClassFile  {
+  u4 magic = 0xcafebabe
+  u2 minor_version = 3
+  u2 major_version = 49
+  u2 constant_pool_count = 29
+  cp_info constant_pool[29] = { ... }
+  u2 access_flags = ( ACC_PUBLIC, ACC_SUPER )
+  u2 this_class = #5 // "Hello"
+  u2 super_class = #6 // "java/lang/Object"
+  u2 interfaces_count = 0
+  u2 interfaces[0] = { ... }
+  u2 fields_count = 0
+  field_info fields[0] = { ... }
+  u2 methods_count = 2
+  method_info methods[2] = { ... }
+  u2 attributes_count = 1
+  attribute_info attributes[1] = { ... }
+}
+>>>
+    </pre></tr></td></table>
+    <p>
+      For access flags, the <tt>ACC_&lt;flag&gt;</tt> variables are defined 
+      and can be used to set the access flag bitfields.  Use the 
+      <tt>or</tt>, <tt>and</tt>, or <tt>not</tt> bit operations to set the 
+      appropriate fields.  There are similar type definitions for the 
+      <tt>T_&lt;type&gt;</tt> constants used in the <tt>newarray</tt> 
+      instruction.
+    </p>
+    <table bgcolor="#c0e0a0" width="80%"><tr><td><pre>
+>>> print ACC_PROTECTED
+4
+>>> Hello.access_flags = ACC_SUPER | ACC_PROTECTED
+>>> print Hello.access_flags
+36
+>>> print Hello
+ClassFile  {
+  u4 magic = 0xcafebabe
+  u2 minor_version = 3
+  u2 major_version = 49
+  u2 constant_pool_count = 29
+  cp_info constant_pool[29] = { ... }
+  u2 access_flags = ( ACC_PROTECTED, ACC_SUPER )
+  u2 this_class = #5 // "Hello"
+  u2 super_class = #6 // "java/lang/Object"
+  u2 interfaces_count = 0
+  u2 interfaces[0] = { ... }
+  u2 fields_count = 0
+  field_info fields[0] = { ... }
+  u2 methods_count = 2
+  method_info methods[2] = { ... }
+  u2 attributes_count = 1
+  attribute_info attributes[1] = { ... }
+}
+>>>
+    </pre></tr></td></table>
+    <p>
+      Some fields it does not make sense to change, such as the Java 
+      signature (the <tt>magic</tt> field).  Also, there are many instances in
+      the classfile where a length field deliniates the length of the following
+      array.  The is crucial in reading in the array, but once loaded the 
+      arrays are represented as python lists which have an implicit length.
+      For this reason, the data structure mechanisms simply use the array 
+      length to update the length field dynamically so there's no need to 
+      change the field yourself.  Change the array instead and the field 
+      will be automatically updated.  This is enforced if you try to write 
+      to an automatically-set length field (this goes for attribute lengths 
+      as well).
+    </p>
+    <table bgcolor="#c0e0a0" width="80%"><tr><td><pre>
+>>> Hello.magic = 0x8badbeef
+Error performing assignment: Field is read-only
+>>> Hello.constant_pool_count = 10
+Error performing assignment: Field is a length field (change the array instead)
+>>> Hello.interfaces_count = 4
+Error performing assignment: Field is a length field (change the array instead)
+>>> Hello.interfaces += [ 4, 5, 6, 7 ]
+>>> print Hello.interfaces_count
+4
+    </pre></tr></td></table>
+    <p>
+      Similarly, some fields are discriminator values which determine the 
+      type of the structure in arrays which have variable-typed contents.  
+      The <tt>tag</tt> field in <tt>cp_info</tt>, for instance is an instance
+      of this.  Since the actual data associated with the structure is the 
+      type, the tag value is redundant after the data has been parsed.  It 
+      is displayed for completeness, but is read-only.  If you want a different
+      discriminator value, replace the entire array entry with the new type, 
+      rather than trying to change the value.
+    </p>
+    <table bgcolor="#c0e0a0" width="80%"><tr><td><pre>
+>>> print Hello.constant_pool[9]
+CONSTANT_Utf8_info  {
+  u1 tag = 1
+  u2 length = 4
+  u1 bytes[] = "Code"
+}
+>>> Hello.constant_pool[9].tag = 7
+Error performing assignment: Can't change cp_info tag
+>>> Hello.constant_pool[9] = CONSTANT_Class_info()
+>>> print Hello.constant_pool[9]
+CONSTANT_Class_info  {
+  u1 tag = 7
+  u2 name_index = #0 // NULL
+}
+    </pre></tr></td></table>
+    <p>
+      When making changes to bytecode which change the size, jallie attempts to 
+      adjust the affected code offsets in the classfile, such as the inter-code 
+      bci offsets in branch instructions, the exception handler table, and the 
+      <tt>LocalVariableTable</tt>, <tt>LocalVariableTypeTable</tt>, 
+      <tt>LineNumberTable</tt>, and <tt>StackMapTable</tt>.  It would be wise to 
+      second-check these values after modifying bytecode to ensure they were 
+      adjusted correctly.
+    </p>
+    <a name="saving"/>
+    <h2>Saving Classes</h2>
+    <p>
+      Once you've made modifications to the classfile, you can write the modified 
+      bytes back to a classfile for later use using the <tt>write()</tt> method.  
+      You can write to the default file name, or specify a specific file to write to.
+      If no extension is given, a '.class' extension is assumed.
+    </p>
+    <table bgcolor="#c0e0a0" width="80%"><tr><td><pre>
+>>> Hello.write()
+Wrote 481 bytes to file 'Hello.class'
+>>> Hello.major_version = 49
+>>> Hello.minor_version = 3
+>>> Hello.write('Hello_v49')
+Wrote 481 bytes to file 'Hello_v49.class'
+>>> Hello.write('bytes.bin')
+Wrote 481 bytes to file 'bytes.bin'
+    </pre></tr></td></table>
+    <a name="settings"/>
+    <h2>Settings</h2>
+    <p>
+      There are a few user-controlable settings that can be used to change the default 
+      behavior.  These settings are contained in the <tt>Settings</tt> class and can be 
+      assigned to at any time.
+    </p>
+    <table bgcolor="#c0c0c0" border="1" width="80%">
+    <tr><th>Value</th><th>Default</th><th>Description</th></tr>
+    <tr><td>extraDetailLevels</td><td align="center">0</td><td>The number of additional levels of detail to display</td></tr>
+    <tr><td>indent</td><td align="center">'&nbsp;&nbsp;'</td><td>What is used as the indent string</td></tr>
+    <tr><td>verbose</td><td align="center">True</td><td>Verbosity-level.  Set to <tt>False</tt> to reduce system messages</td></tr>
+    </table>
+    <p>
+      For example:
+    </p>
+    <table bgcolor="#c0e0a0" width="80%"><tr><td><pre>
+>>> Settings.extraDetailLevels=2
+>>> Settings.indent='"""'
+>>> print Hello.methods[1]
+method_info  {
+"""u2 access_flags = ( ACC_PUBLIC, ACC_STATIC )
+"""u2 name_index = #11 // "main"
+"""u2 descriptor_index = #12 // "([Ljava/lang/String;)V"
+"""u2 attributes_count = 1
+"""attribute_info attributes[1] {
+""""""[ 0 ] attribute_info  {
+"""""""""u2 attribute_name_index = #9 // "Code"
+"""""""""u4 attribute_length = 37
+"""""""""u2 max_stack = 2
+"""""""""u2 max_locals = 1
+"""""""""u4 code_length = 9
+"""""""""bytecode code[4] = { ... }
+"""""""""u2 exception_table_length = 0
+"""""""""exception_table_entry exception_table[0] = { ... }
+"""""""""u2 attributes_count = 1
+"""""""""attribute_info attributes[1] = { ... }
+""""""}
+"""}
+}
+    </pre></tr></td></table>
+    <a name="scripting"/>
+    <h2>Scripting</h2>
+    <p>
+      Jallie can also be used to bulk-process classfiles. This can be used for summarizing, 
+      searching, or algorithmically modifying classfiles.  To use the processing capability, 
+      create a module with a global method named <tt>for_ClassFile</tt> which takes two arguments, 
+      a ClassFile object, and an optional pass-in command-line parameter.  
+      When the module name is passed to the <tt>--processor</tt> flag, instead of entering 
+      interactive mode, jallie will parse each classfile in it's command-list and call the 
+      <tt>for_ClassFile</tt> method with each classfile as an argument.  If a <tt>--processor_arg</tt> 
+      value is specified on the command line, that is passed as the scond argument to <tt>for_ClassFile</tt>
+      For example:
+    </p>
+    <table bgcolor="#c0e0a0" width="80%"><tr><td><pre>
+> cat version.py
+
+def for_ClassFile(cf, arg):
+  print '%s %s: %d.%d: num methods: %d' % \
+    ( arg, cf.classname(), cf.major_version, cf.minor_version, len(cf.methods) )
+
+> jallie -q --processor=version --processor_arg=asdf Hello LockExample 2>/dev/null
+asdf Hello: 51.0: num methods: 2
+asdf LockExample: 49.0: num methods: 4
+    </pre></tr></td></table>
+    <hr/>
+  </TD></TR><TR></TR></TABLE">
+  </body>
+</html>
